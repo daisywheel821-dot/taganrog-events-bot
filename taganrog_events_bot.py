@@ -178,7 +178,7 @@ async def main():
         send_daily_events,
         'cron',
         hour=17,
-        minute=53,
+        minute=57,
         timezone="Europe/Moscow"
     )
     
