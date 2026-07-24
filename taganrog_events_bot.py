@@ -177,8 +177,8 @@ async def main():
     scheduler.add_job(
         send_daily_events,
         'cron',
-        hour=9,
-        minute=0,
+        hour=17,
+        minute=53,
         timezone="Europe/Moscow"
     )
     
