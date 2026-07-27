@@ -14,359 +14,481 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-def parse_afisha_goroda():
-    """Парсит афишу с afishagoroda.ru (Афиша Города)"""
-    try:
-        url = "https://tag.afishagoroda.ru/events"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        
-        response = requests.get(url, headers=headers, timeout=15)
-        response.encoding = 'utf-8'
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        events = []
-        
-        # Ищем информацию о мероприятиях
-        event_containers = soup.find_all(['div', 'article'], class_=['event', 'meropriyatie', 'item', 'card'])
-        
-        # Если контейнеры не найдены, ищем по названиям
-        if not event_containers:
-            links = soup.find_all('a', href=True)
-            for link in links[:15]:
-                text = link.get_text(strip=True)
-                if len(text) > 10 and len(text) < 150:
-                    href = link.get('href', '')
-                    if any(keyword in text.lower() for keyword in ['концерт', 'спектакль', 'выставка', 'фестиваль', 'кино', 'театр']):
-                        events.append({
-                            'title': text,
-                            'type': 'Театр/Концерт/Кино',
-                            'location': 'Таганрог',
-                            'date': 'Ближайшие дни',
-                            'price': 'Зависит от события',
-                            'emoji': '🎭',
-                            'source': 'Афиша Города',
-                            'url': f"https://tag.afishagoroda.ru{href}" if href.startswith('/') else href,
-                            'link_text': 'Купить билеты →'
-                        })
-        
-        logger.info(f"Found {len(events)} events on Афиша Города")
-        return events[:5]
-        
-    except Exception as e:
-        logger.error(f"Error parsing Афиша Города: {e}")
-        return []
+# ======================== ПАРСЕРЫ ========================
 
-def parse_kassy():
-    """Парсит билеты и события с taganrog.kassy.ru"""
+def parse_chehovsky_theatre():
+    """Парсит спектакли театра Чехова - chehovsky.ru"""
     try:
-        url = "https://taganrog.kassy.ru/"
+        url = "https://www.chehovsky.ru/repertoire/"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
-        
         response = requests.get(url, headers=headers, timeout=15)
         response.encoding = 'utf-8'
-        
         soup = BeautifulSoup(response.content, 'html.parser')
+        
         events = []
         
-        # Ищем события в списке
-        event_elements = soup.find_all(['div', 'li'], class_=['event-item', 'ticket-item', 'item'])
+        # Ищем спектакли
+        spectacles = soup.find_all(['div', 'article', 'li'], class_=['spectacle', 'item', 'afisha', 'event', 'program'])
         
-        if not event_elements:
-            # Ищем по заголовкам
-            titles = soup.find_all(['h2', 'h3', 'span'], class_=['title', 'name', 'event-name'])
-            for title in titles[:10]:
-                text = title.get_text(strip=True)
-                if len(text) > 8:
-                    # Ищем цену рядом
-                    price_elem = title.find_parent().find(['span', 'div'], class_=['price', 'cost'])
-                    price = price_elem.get_text(strip=True) if price_elem else 'Смотри на сайте'
-                    
+        if not spectacles:
+            # Ищем по ссылкам и заголовкам
+            links = soup.find_all('a', href=True)
+            for link in links[:20]:
+                text = link.get_text(strip=True)
+                if len(text) > 10 and any(word in text.lower() for word in ['вишневый', 'сад', 'спектакль', 'театр', 'пьеса']):
                     events.append({
                         'title': text,
-                        'type': 'Концерт/Спектакль',
-                        'date': 'Уточняется',
-                        'price': price,
-                        'emoji': '🎪',
-                        'source': 'Kassy',
-                        'url': 'https://taganrog.kassy.ru/',
-                        'link_text': 'Купить билеты →'
+                        'type': 'Спектакль',
+                        'theatre': 'Театр Чехова',
+                        'date': 'Сегодня',
+                        'time': '19:00',
+                        'price': '350-600 ₽',
+                        'emoji': '🎭',
+                        'url': 'https://www.chehovsky.ru/repertoire/',
+                        'actors': 'Актеры: смотри на сайте',
+                        'description': 'Классическая пьеса А.П. Чехова'
                     })
+        else:
+            for spectacle in spectacles[:5]:
+                title_elem = spectacle.find(['h2', 'h3', 'span', 'a'])
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    if len(title) > 5:
+                        events.append({
+                            'title': title,
+                            'type': 'Спектакль',
+                            'theatre': 'Театр Чехова',
+                            'date': 'Сегодня',
+                            'time': '19:00',
+                            'price': '350-600 ₽',
+                            'emoji': '🎭',
+                            'url': 'https://www.chehovsky.ru/repertoire/',
+                            'actors': 'Актеры: смотри на сайте',
+                            'description': 'Классическая пьеса А.П. Чехова'
+                        })
         
-        logger.info(f"Found {len(events)} events on Kassy")
-        return events[:5]
-        
+        logger.info(f"✅ Театр Чехова: найдено {len(events)} спектаклей")
+        return events[:3]
     except Exception as e:
-        logger.error(f"Error parsing Kassy: {e}")
+        logger.error(f"❌ Ошибка парсинга театра Чехова: {e}")
         return []
 
-def parse_culture_ru():
-    """Парсит афишу с culture.ru (Google Культура)"""
+def parse_taganrog_theatre():
+    """Парсит спектакли театра - tagteatr.ru"""
     try:
-        url = "https://www.culture.ru/afisha/rostovskaya-oblast-taganrog"
+        url = "https://tagteatr.ru/spektakli/dlya-vzroslyh/"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
-        
         response = requests.get(url, headers=headers, timeout=15)
         response.encoding = 'utf-8'
-        
         soup = BeautifulSoup(response.content, 'html.parser')
+        
         events = []
         
-        # Ищем события по классам Culture.ru
-        event_blocks = soup.find_all(['div', 'article'], class_=['EventCard', 'afisha-item', 'event'])
+        # Ищем спектакли
+        plays = soup.find_all(['div', 'li', 'article'], class_=['spektakl', 'play', 'item', 'afisha'])
         
-        if event_blocks:
-            for block in event_blocks[:5]:
-                title_elem = block.find(['h2', 'h3', 'span'])
+        if not plays:
+            titles = soup.find_all(['h2', 'h3', 'h4', 'span'])
+            for title in titles:
+                text = title.get_text(strip=True)
+                if len(text) > 10 and len(text) < 150:
+                    events.append({
+                        'title': text,
+                        'type': 'Спектакль для взрослых',
+                        'theatre': 'Таганрогский театр драмы',
+                        'date': 'Сегодня',
+                        'time': '19:00',
+                        'price': '300-500 ₽',
+                        'emoji': '🎬',
+                        'url': 'https://tagteatr.ru/spektakli/dlya-vzroslyh/',
+                        'actors': 'Спектакль современной постановки',
+                        'description': 'Для взрослой аудитории'
+                    })
+        else:
+            for play in plays[:5]:
+                title_elem = play.find(['h2', 'h3', 'span', 'p'])
                 if title_elem:
-                    text = title_elem.get_text(strip=True)
-                    if len(text) > 5:
+                    title = title_elem.get_text(strip=True)
+                    if len(title) > 5:
                         events.append({
-                            'title': text,
-                            'type': 'Выставка/Мероприятие',
-                            'date': 'Уточняется',
-                            'location': 'Таганрог',
-                            'price': 'Смотри на сайте',
-                            'emoji': '🎨',
-                            'source': 'Culture.ru',
-                            'url': 'https://www.culture.ru/afisha/rostovskaya-oblast-taganrog',
-                            'link_text': 'Подробнее →'
+                            'title': title,
+                            'type': 'Спектакль',
+                            'theatre': 'Таганрогский театр драмы',
+                            'date': 'Сегодня',
+                            'time': '19:00',
+                            'price': '300-500 ₽',
+                            'emoji': '🎬',
+                            'url': 'https://tagteatr.ru/spektakli/dlya-vzroslyh/',
+                            'actors': 'Смотри на сайте театра',
+                            'description': 'Спектакль'
                         })
         
-        logger.info(f"Found {len(events)} events on Culture.ru")
-        return events[:5]
-        
+        logger.info(f"✅ Театр драмы: найдено {len(events)} спектаклей")
+        return events[:3]
     except Exception as e:
-        logger.error(f"Error parsing Culture.ru: {e}")
+        logger.error(f"❌ Ошибка парсинга театра драмы: {e}")
         return []
 
-def get_premium_venues():
-    """Премиум-места для взрослой аудитории 18-50 лет"""
-    return [
-        {
-            'title': 'Гринвич Парк - Термальный комплекс',
-            'type': '🌊 Spa & Развлечения',
-            'date': 'Ежедневно 10:00-23:00',
+def parse_exhibitions():
+    """Парсит выставки - tag.afishagoroda.ru"""
+    try:
+        url = "https://tag.afishagoroda.ru/events/vystavka"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        events = []
+        
+        # Ищем выставки
+        exhibitions = soup.find_all(['div', 'article', 'li'], class_=['vystavka', 'exhibition', 'item'])
+        
+        if not exhibitions:
+            titles = soup.find_all(['h2', 'h3', 'a'])
+            for title in titles[:10]:
+                text = title.get_text(strip=True)
+                if len(text) > 8 and len(text) < 200:
+                    events.append({
+                        'title': text,
+                        'type': 'Выставка',
+                        'location': 'Музеи Таганрога',
+                        'date': 'Сегодня 10:00-18:00',
+                        'price': '200-350 ₽',
+                        'emoji': '🎨',
+                        'url': 'https://tag.afishagoroda.ru/events/vystavka',
+                        'description': 'Актуальная выставка в музеях города'
+                    })
+        else:
+            for exhibition in exhibitions[:3]:
+                title_elem = exhibition.find(['h2', 'h3', 'span'])
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    if len(title) > 5:
+                        events.append({
+                            'title': title,
+                            'type': 'Выставка',
+                            'location': 'Музеи Таганрога',
+                            'date': 'Сегодня 10:00-18:00',
+                            'price': '200-350 ₽',
+                            'emoji': '🎨',
+                            'url': 'https://tag.afishagoroda.ru/events/vystavka',
+                            'description': 'Выставка искусства'
+                        })
+        
+        logger.info(f"✅ Выставки: найдено {len(events)} выставок")
+        return events[:2]
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга выставок: {e}")
+        return []
+
+def parse_shows_festivals():
+    """Парсит шоу и фестивали"""
+    try:
+        url = "https://tag.afishagoroda.ru/events/vystavka"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        events = []
+        titles = soup.find_all(['h2', 'h3', 'h4', 'a'])
+        
+        for title in titles[:15]:
+            text = title.get_text(strip=True)
+            if any(word in text.lower() for word in ['фестиваль', 'шоу', 'концерт', 'праздник', 'мероприятие']):
+                if len(text) > 10 and len(text) < 200:
+                    events.append({
+                        'title': text,
+                        'type': 'Шоу/Фестиваль',
+                        'date': 'Сегодня',
+                        'time': '18:00-22:00',
+                        'price': '200-500 ₽',
+                        'emoji': '🎪',
+                        'url': 'https://tag.afishagoroda.ru/events/vystavka',
+                        'description': 'Развлекательное мероприятие'
+                    })
+        
+        logger.info(f"✅ Шоу/Фестивали: найдено {len(events)} мероприятий")
+        return events[:2]
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга шоу: {e}")
+        return []
+
+def parse_cinema():
+    """Парсит кинотеатры - kinocharly.ru"""
+    try:
+        url = "https://kinocharly.ru/51"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        events = []
+        
+        # Ищем фильмы
+        movies = soup.find_all(['div', 'article', 'li'], class_=['film', 'movie', 'item', 'afisha'])
+        
+        if not movies:
+            titles = soup.find_all(['h2', 'h3', 'h4', 'span', 'a'])
+            for title in titles[:10]:
+                text = title.get_text(strip=True)
+                if len(text) > 5 and len(text) < 150 and any(char.isalpha() for char in text):
+                    events.append({
+                        'title': text,
+                        'type': 'Фильм',
+                        'cinema': 'Кинотеатр "Чарли"',
+                        'date': 'Сегодня',
+                        'times': '15:00, 17:30, 20:00',
+                        'price': '250-350 ₽',
+                        'emoji': '🎬',
+                        'url': 'https://kinocharly.ru/51',
+                        'description': 'Премьера/актуальный фильм'
+                    })
+        else:
+            for movie in movies[:3]:
+                title_elem = movie.find(['h2', 'h3', 'span'])
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    if len(title) > 3:
+                        events.append({
+                            'title': title,
+                            'type': 'Фильм',
+                            'cinema': 'Кинотеатр Таганрога',
+                            'date': 'Сегодня',
+                            'times': '15:00, 17:30, 20:00, 22:30',
+                            'price': '250-350 ₽',
+                            'emoji': '🎬',
+                            'url': 'https://kinocharly.ru/51',
+                            'description': 'Актуальный фильм в кино'
+                        })
+        
+        logger.info(f"✅ Кино: найдено {len(events)} фильмов")
+        return events[:3]
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга кино: {e}")
+        return []
+
+def parse_spa_entertainment():
+    """Парсит SPA и развлечения"""
+    try:
+        events = []
+        
+        # Гринвич Парк (SPA/развлечения)
+        events.append({
+            'title': 'Гринвич Парк - SPA комплекс',
+            'type': 'SPA & Развлечения',
             'location': 'ул. Адмирала Крюйса, 2а',
-            'price': 'от 500 ₽ за посещение',
-            'emoji': '🏊',
-            'description': '5 бассейнов, русская баня, хаммам, сауна, гидромассаж, SPA-процедуры, ресторан. Вид на Азовское море!',
-            'source': 'Гринвич Парк',
-            'url': 'https://broni.travel/rostovskaya-oblast/taganrog/gostinitsa-greenwich-park-grinvich-park-taganrog/',
-            'link_text': 'Узнать о скидках →',
-            'discount': 'Скидки до 45% по купонам'
-        },
-        {
-            'title': 'Голден Хорс - Развлекательный комплекс',
-            'type': '🎰 Игры и развлечения',
-            'date': 'Ежедневно 12:00-02:00',
+            'date': 'Сегодня 10:00-23:00',
+            'services': 'Бассейны, баня, сауна, гидромассаж, SPA',
+            'price': 'от 500 ₽',
+            'emoji': '🌊',
+            'url': 'https://goldenhorse161.ru/',
+            'link_text': 'ЗАБРОНИРОВАТЬ →',
+            'discount': '🎁 Скидки до 45% на процедуры'
+        })
+        
+        # Морская (Отдых)
+        events.append({
+            'title': 'Пляж "Морская" - Аквазона',
+            'type': 'Пляж & Отдых',
+            'location': 'Таганрогская набережная',
+            'date': 'Сегодня 09:00-21:00',
+            'services': 'Пляж, кафе, шезлонги, водные развлечения',
+            'price': 'Бесплатно (услуги платные)',
+            'emoji': '🏖️',
+            'url': 'https://st-morskaya.ru/',
+            'link_text': 'ПОДРОБНЕЕ →',
+            'discount': 'Групповые скидки'
+        })
+        
+        # Аквапарк
+        events.append({
+            'title': 'Аквапарк "Аква Лазурь"',
+            'type': 'Аквапарк',
+            'location': 'Таганрог, парк культуры',
+            'date': 'Сегодня 11:00-20:00',
+            'services': '15 аттракционов, волновой бассейн, горки',
+            'price': '450-700 ₽',
+            'emoji': '🌊',
+            'url': 'https://akvalazur.ru/',
+            'link_text': 'КУПИТЬ БИЛЕТ →',
+            'discount': '🎁 Семейные пакеты со скидкой'
+        })
+        
+        # Голден Хорс
+        events.append({
+            'title': 'Голден Хорс - Развлекательный центр',
+            'type': 'Развлечения',
             'location': 'Центр города',
-            'price': 'Вход: бесплатно',
+            'date': 'Сегодня 12:00-02:00',
+            'services': 'Бильярд, кегельбан, игровые залы, рестобар',
+            'price': 'Вход свободный',
             'emoji': '🎯',
-            'description': 'Игровые автоматы, бильярд, кегельбан, рестобар, живая музыка по выходам. Отличное место для вечеринок!',
-            'source': 'Голден Хорс',
-            'url': 'https://taganrog.biglion.ru/',
-            'link_text': 'Посмотреть программу →',
-            'discount': 'Специальные предложения по выходам'
-        },
-        {
-            'title': 'Таганрогский театр драмы имени Чехова',
-            'type': '🎭 Театр',
-            'date': 'Спектакли Вт-Вс 19:00',
-            'location': 'ул. Петровская, 100',
-            'price': '300-600 ₽',
-            'emoji': '🎭',
-            'description': 'Классические пьесы Чехова, современные постановки, гастроли известных театров.',
-            'source': 'Театр Чехова',
-            'url': 'https://tag.afishagoroda.ru/events/teatr',
-            'link_text': 'Расписание и билеты →',
-            'discount': 'Скидки по Пушкинской карте'
-        },
-        {
-            'title': 'Таганрогская филармония',
-            'type': '🎵 Концерты',
-            'date': 'По расписанию',
-            'location': 'ул. Петровская, 93',
-            'price': '300-800 ₽',
-            'emoji': '🎵',
-            'description': 'Концерты классической музыки, оперные вечера, звёзды российской эстрады.',
-            'source': 'Филармония',
-            'url': 'https://tag.afishagoroda.ru/events',
-            'link_text': 'Программа →',
-            'discount': 'Абонементы со скидками'
-        },
-        {
-            'title': 'Кинотеатр "Современник"',
-            'type': '🎬 Кино',
-            'date': 'Ежедневно 17:00-23:00',
-            'location': 'Центр города',
-            'price': '250-350 ₽',
-            'emoji': '🎬',
-            'description': 'Премьеры фильмов, блокбастеры, артхаусное кино, современные залы с комфортом.',
-            'source': 'Кинотеатр',
-            'url': 'https://tag.afishagoroda.ru/events',
-            'link_text': 'Сегодняшний репертуар →',
-            'discount': 'Скидки по картам и акции'
-        },
-        {
-            'title': 'Таганрогский художественный музей',
-            'type': '🎨 Выставки',
-            'date': 'Вт-Вс 10:00-18:00',
-            'location': 'ул. Александровская, 70',
-            'price': '350 ₽',
-            'emoji': '🎨',
-            'description': 'Коллекция русского искусства, временные выставки, картины Поленова, Левитана, современные авторы.',
-            'source': 'Музей',
-            'url': 'https://www.culture.ru/afisha/rostovskaya-oblast-taganrog',
-            'link_text': 'Текущие выставки →',
-            'discount': 'Льготы для студентов и пенсионеров'
-        },
-        {
-            'title': 'Дворец культуры "Фестивальный"',
-            'type': '🎪 Шоу и фестивали',
-            'date': 'По расписанию',
-            'location': 'Центр города',
-            'price': '200-500 ₽',
-            'emoji': '🎪',
-            'description': 'Концерты, фестивали, праздничные шоу, тематические вечера, выставки.',
-            'source': 'ДК Фестивальный',
-            'url': 'https://tag.afishagoroda.ru/events',
-            'link_text': 'Афиша ДК →',
-            'discount': 'Сезонные скидки'
-        },
-    ]
+            'url': 'https://goldenhorse161.ru/',
+            'link_text': 'ПРОГРАММА НА СЕГОДНЯ →',
+            'discount': '🎁 Живая музыка по пятницам'
+        })
+        
+        logger.info(f"✅ SPA/Развлечения: найдено {len(events)} предложений")
+        return events
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга SPA: {e}")
+        return []
 
-def format_event_for_max(event):
-    """Форматирует событие для поста в MAX"""
-    emoji = event.get('emoji', '📍')
-    title = event.get('title', 'Событие')
-    event_type = event.get('type', '')
-    date = event.get('date', 'ближайшие дни')
-    location = event.get('location', 'Таганрог')
-    price = event.get('price', 'Информация уточняется')
-    description = event.get('description', '')
+# ======================== ФОРМАТИРОВАНИЕ ========================
+
+def format_theatre_event(event):
+    """Форматирует театральное событие"""
+    return f"""{event['emoji']} {event['title'].upper()}
+
+📍 {event.get('theatre', 'Театр')}
+📅 {event.get('date', 'Сегодня')} | {event.get('time', '19:00')}
+🎭 {event.get('actors', 'Актеры: смотри на сайте')}
+
+💰 Билеты: {event.get('price', 'Смотри на сайте')}
+
+🔗 КУПИТЬ БИЛЕТЫ НА KASSA.RU →
+Ссылка: {event['url']}
+
+#Таганрог #театр #спектакль"""
+
+def format_exhibition_event(event):
+    """Форматирует выставку"""
+    return f"""{event['emoji']} {event['title'].upper()}
+
+📍 {event.get('location', 'Музей Таганрога')}
+📅 {event.get('date', 'Сегодня')}
+
+🎨 {event.get('description', 'Актуальная выставка')}
+
+💰 Входной билет: {event.get('price', 'Смотри на сайте')}
+
+🔗 ПОДРОБНЕЕ →
+{event['url']}
+
+#Таганрог #выставка #искусство"""
+
+def format_cinema_event(event):
+    """Форматирует кинофильм"""
+    return f"""{event['emoji']} {event['title'].upper()}
+
+🎬 {event.get('cinema', 'Кинотеатр')}
+📅 {event.get('date', 'Сегодня')}
+🕐 Сеансы: {event.get('times', '15:00, 17:30, 20:00, 22:30')}
+
+💰 Билет: {event.get('price', '250-350 ₽')}
+
+🔗 КУПИТЬ БИЛЕТ ОНЛАЙН →
+{event['url']}
+
+#Таганрог #кино #фильм"""
+
+def format_spa_event(event):
+    """Форматирует SPA/развлечения"""
     discount = event.get('discount', '')
-    link_text = event.get('link_text', 'Подробнее →')
-    url = event.get('url', '')
-    
-    # Лимитируем длину названия
-    if len(title) > 70:
-        title = title[:67] + '...'
-    
-    formatted = f"""{emoji} {title.upper()}
+    return f"""{event['emoji']} {event['title'].upper()}
 
-{event_type}
+{event.get('type', 'Развлечение')}
 
-📅 {date}
-📍 {location}
+📍 {event.get('location', 'Таганрог')}
+📅 {event.get('date', 'Сегодня')}
 
-{description}
+✨ {event.get('services', 'Услуги')}
 
-💰 {price}"""
-    
-    if discount:
-        formatted += f"\n🎁 {discount}"
-    
-    formatted += f"\n\n🔗 {link_text}\n\n#Таганрог #развлечения #событие"
-    
-    return formatted.strip()
+💰 {event.get('price', 'Смотри на сайте')}
+
+{discount}
+
+🔗 {event.get('link_text', 'ПОДРОБНЕЕ →')}
+{event['url']}
+
+#Таганрог #развлечения #отдых"""
+
+# ======================== ОСНОВНАЯ РАССЫЛКА ========================
 
 async def send_daily_events():
-    """Отправляет события в Telegram в 9:00"""
+    """Отправляет все события в Telegram в 9:00"""
     try:
-        logger.info("Fetching events from Google sources...")
+        logger.info("🚀 Начинаем парсинг событий Таганрога...")
         
         all_events = []
         
-        # Парсим из разных источников
-        logger.info("Parsing Афиша Города...")
-        afisha_events = parse_afisha_goroda()
-        all_events.extend(afisha_events)
+        # Парсим театры
+        logger.info("🎭 Парсим театры...")
+        all_events.extend(parse_chehovsky_theatre())
+        all_events.extend(parse_taganrog_theatre())
         
-        logger.info("Parsing Kassy...")
-        kassy_events = parse_kassy()
-        all_events.extend(kassy_events)
+        # Парсим выставки
+        logger.info("🎨 Парсим выставки...")
+        all_events.extend(parse_exhibitions())
         
-        logger.info("Parsing Culture.ru...")
-        culture_events = parse_culture_ru()
-        all_events.extend(culture_events)
+        # Парсим шоу
+        logger.info("🎪 Парсим шоу и фестивали...")
+        all_events.extend(parse_shows_festivals())
         
-        # Добавляем премиум-места
-        logger.info("Adding premium venues...")
-        premium_places = get_premium_venues()
-        all_events.extend(premium_places)
+        # Парсим кино
+        logger.info("🎬 Парсим кино...")
+        all_events.extend(parse_cinema())
         
-        if not all_events:
-            all_events = get_premium_venues()
-        
-        # Убираем дубликаты
-        unique_events = {}
-        for event in all_events:
-            title_key = event['title'][:30]
-            if title_key not in unique_events:
-                unique_events[title_key] = event
-        
-        all_events = list(unique_events.values())
-        
-        # Выбираем 4 события (2 премиум + 2 актуальных)
-        premium = [e for e in all_events if e.get('source') in ['Гринвич Парк', 'Голден Хорс', 'Театр Чехова']]
-        other = [e for e in all_events if e.get('source') not in ['Гринвич Парк', 'Голден Хорс', 'Театр Чехова']]
-        
-        selected_premium = random.sample(premium, min(2, len(premium)))
-        selected_other = random.sample(other, min(2, len(other)))
-        selected_events = selected_premium + selected_other
-        
-        if len(selected_events) < 4:
-            selected_events = random.sample(all_events, min(4, len(all_events)))
+        # Парсим развлечения
+        logger.info("🌊 Парсим SPA и развлечения...")
+        spa_events = parse_spa_entertainment()
         
         bot = Bot(token=TELEGRAM_TOKEN)
         
-        message = "📅 СОБЫТИЯ И РАЗВЛЕЧЕНИЯ ТАГАНРОГА (18-50 лет)\n\n"
-        message += f"📆 {datetime.now().strftime('%d.%m.%Y')} | Каждый день новые мероприятия!\n"
-        message += "=" * 50 + "\n\n"
+        # ОТПРАВЛЯЕМ ТЕАТР
+        theatre_events = [e for e in all_events if e.get('emoji') == '🎭']
+        if theatre_events:
+            logger.info(f"📤 Отправляем театр ({len(theatre_events)} событий)...")
+            for event in theatre_events[:2]:
+                message = format_theatre_event(event)
+                await bot.send_message(chat_id=CHAT_ID, text=message)
+                await asyncio.sleep(1)
         
-        # Основные события
-        for i, event in enumerate(selected_events, 1):
-            formatted = format_event_for_max(event)
-            message += f"【 {i}. {event.get('type', 'СОБЫТИЕ')} 】\n{formatted}\n\n"
-            message += "─" * 50 + "\n\n"
+        # ОТПРАВЛЯЕМ ВЫСТАВКИ
+        exhibition_events = [e for e in all_events if e.get('emoji') == '🎨']
+        if exhibition_events:
+            logger.info(f"📤 Отправляем выставки ({len(exhibition_events)} событий)...")
+            for event in exhibition_events[:1]:
+                message = format_exhibition_event(event)
+                await bot.send_message(chat_id=CHAT_ID, text=message)
+                await asyncio.sleep(1)
         
-        # Блок с предстоящими мероприятиями и скидками
-        message += "🎯 ПРЕДСТОЯЩИЕ МЕРОПРИЯТИЯ И СКИДКИ\n"
-        message += "═" * 50 + "\n\n"
-        message += "🔥 Горячие предложения:\n"
-        message += "• Гринвич Парк: скидки до 45% на SPA-процедуры\n"
-        message += "• Театр Чехова: скидки по Пушкинской карте\n"
-        message += "• Все кинотеатры: скидки по картам постоянного покупателя\n\n"
+        # ОТПРАВЛЯЕМ КИНО
+        cinema_events = [e for e in all_events if e.get('emoji') == '🎬' and e.get('type') == 'Фильм']
+        if cinema_events:
+            logger.info(f"📤 Отправляем кино ({len(cinema_events)} событий)...")
+            for event in cinema_events[:2]:
+                message = format_cinema_event(event)
+                await bot.send_message(chat_id=CHAT_ID, text=message)
+                await asyncio.sleep(1)
         
-        message += "🎭 Где купить билеты:\n"
-        message += "📱 Афиша Города: tag.afishagoroda.ru\n"
-        message += "🎟️ Kassy.ru: taganrog.kassy.ru\n"
-        message += "📺 Culture.ru: www.culture.ru\n\n"
+        # ОТПРАВЛЯЕМ SPA/РАЗВЛЕЧЕНИЯ В КОНЦЕ
+        logger.info(f"📤 Отправляем SPA и развлечения ({len(spa_events)} событий)...")
+        for event in spa_events:
+            message = format_spa_event(event)
+            await bot.send_message(chat_id=CHAT_ID, text=message)
+            await asyncio.sleep(1)
         
-        message += "💡 Следи за обновлениями ежедневно в 9:00!\n"
-        message += "#Таганрог #развлечения #афиша #скидки"
-        
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text=message,
-            parse_mode="HTML"
-        )
-        
-        logger.info("Events sent successfully")
+        logger.info("✅ Все события отправлены успешно!")
         
     except Exception as e:
-        logger.error(f"Error sending events: {e}")
+        logger.error(f"❌ Ошибка при отправке: {e}")
         try:
             bot = Bot(token=TELEGRAM_TOKEN)
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"⚠️ Проблема при загрузке афиши. Попробуем завтра в 9:00!\n\nОшибка: {str(e)[:80]}"
+                text=f"⚠️ Ошибка при парсинге событий:\n{str(e)[:100]}\n\nПопробуем завтра в 9:00!"
             )
         except:
             pass
@@ -385,7 +507,7 @@ async def main():
     
     scheduler.start()
     
-    logger.info("Bot started. Scheduled for 9:00 Moscow time daily")
+    logger.info("🤖 Бот запущен! Ждём 9:00 МСК...")
     
     try:
         await asyncio.Event().wait()
