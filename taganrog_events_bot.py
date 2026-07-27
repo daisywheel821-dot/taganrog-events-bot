@@ -500,14 +500,14 @@ async def main():
     scheduler.add_job(
         send_daily_events,
         'cron',
-        hour=12,
+        hour=9,
         minute=0,
         timezone="Europe/Moscow"
     )
     
     scheduler.start()
     
-    logger.info("🤖 Бот запущен! Ждём 12:00 МСК...")
+    logger.info("🤖 Бот запущен! Ждём 9:00 МСК...")
     
     try:
         await asyncio.Event().wait()
