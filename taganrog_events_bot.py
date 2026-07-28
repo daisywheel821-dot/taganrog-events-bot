@@ -4,12 +4,11 @@ import sqlite3
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, date, timedelta
-import schedule
 import time
 import os
 import re
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Optional
 from enum import Enum
 
 from telegram import Bot, InputMediaPhoto
@@ -17,11 +16,10 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 # ==========================================
-# НАСТРОЙКИ (ЗАМЕНИ НА СВОИ)
+# НАСТРОЙКИ (берутся из секретов GitHub Actions)
 # ==========================================
-import os
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-YOUR_CHAT_ID = os.environ.get("CHAT_ID") # или @username канала
+CHAT_ID = os.environ.get("CHAT_ID")
 # ==========================================
 
 logging.basicConfig(
@@ -64,15 +62,14 @@ class Event:
     availability: str
     age_limit: str
     duration: str
-    image_url: str = ""  # URL картинки события
-    fallback_banner: str = ""  # Локальный файл-заглушка
+    image_url: str = ""
+    fallback_banner: str = ""
 
     def get_unique_key(self):
         raw = f"{self.title}_{self.date_str}_{self.time_str}_{self.tickets_url}"
         return re.sub(r'[^a-zA-Z0-9а-яА-ЯёЁ]', '_', raw)[:200]
 
     def get_image_source(self) -> str | None:
-        """Возвращает либо URL, либо путь к локальному файлу, либо None"""
         if self.image_url and self.image_url.startswith("http"):
             return self.image_url
         if self.fallback_banner and os.path.exists(self.fallback_banner):
@@ -130,7 +127,6 @@ def fetch_soup(url: str) -> Optional[BeautifulSoup]:
         return None
 
 def extract_image(card: BeautifulSoup, base_url: str = "") -> str:
-    """Пытается найти URL картинки в карточке события"""
     img = card.select_one("img")
     if img:
         src = img.get("src") or img.get("data-src") or ""
@@ -138,12 +134,10 @@ def extract_image(card: BeautifulSoup, base_url: str = "") -> str:
             if src.startswith("//"):
                 return "https:" + src
             if src.startswith("/"):
-                # Пытаемся склеить с базовым URL
                 from urllib.parse import urljoin
                 return urljoin(base_url, src)
             if src.startswith("http"):
                 return src
-    # Ищем background-image в style
     style_tag = card.select_one("[style*='background-image']")
     if style_tag:
         style = style_tag.get("style", "")
@@ -154,21 +148,17 @@ def extract_image(card: BeautifulSoup, base_url: str = "") -> str:
 
 # ===================== ПАРСЕРЫ =====================
 
-# 1. Театр — афиша на месяц
 def parse_theatre_month() -> List[Event]:
     events = []
     url = "https://www.chehovsky.ru/repertoire/"
     soup = fetch_soup(url)
     if not soup:
         return events
-
-    # TODO: заменить селекторы после инспекции сайта
     cards = soup.select(".repertoire-item, .event-card, article")
     for card in cards:
         title_tag = card.select_one(".title, h2, h3, a")
         date_tag = card.select_one(".date, .event-date, time")
         link_tag = card.select_one("a[href]")
-
         if title_tag:
             title = title_tag.get_text(strip=True)
             events.append(Event(
@@ -191,14 +181,12 @@ def parse_theatre_month() -> List[Event]:
             ))
     return events
 
-# 2. Театр — сегодня
 def parse_theatre_today() -> List[Event]:
     events = []
     url = "https://www.chehovsky.ru/afishateatra/"
     soup = fetch_soup(url)
     if not soup:
         return events
-
     today_str = date.today().strftime("%d.%m.%Y")
     cards = soup.select(".afisha-item, .event, .post")
     for card in cards:
@@ -227,22 +215,18 @@ def parse_theatre_today() -> List[Event]:
                 ))
     return events
 
-# 3. Кинотеатр Чарли
 def parse_cinema() -> List[Event]:
     events = []
     url = "https://kinocharly.ru/51"
     soup = fetch_soup(url)
     if not soup:
         return events
-
     today_str = date.today().strftime("%d.%m")
-    # TODO: заменить селекторы
     film_blocks = soup.select(".film-item, .movie-card, .schedule-item")
     for block in film_blocks:
         title_tag = block.select_one(".film-title, .movie-title, h3")
         time_tags = block.select(".session-time, .time")
         link_tag = block.select_one("a[href]")
-
         if title_tag:
             title = title_tag.get_text(strip=True)
             times = [t.get_text(strip=True) for t in time_tags] if time_tags else []
@@ -266,17 +250,13 @@ def parse_cinema() -> List[Event]:
             ))
     return events
 
-# 4. Музеи
 def parse_museums() -> List[Event]:
     events = []
     url = "https://tgliamz.ru/calendar/"
     soup = fetch_soup(url)
     if not soup:
         return events
-
-    today = date.today()
-    today_str = today.strftime("%d.%m.%Y")
-
+    today_str = date.today().strftime("%d.%m.%Y")
     cards = soup.select(".calendar-event, .event-item, .exhibit")
     for card in cards:
         title_tag = card.select_one(".event-title, h3, .title")
@@ -302,7 +282,6 @@ def parse_museums() -> List[Event]:
             ))
     return events
 
-# 5. Мероприятия (GorodZovet)
 def parse_events() -> List[Event]:
     events = []
     urls = [
@@ -312,28 +291,22 @@ def parse_events() -> List[Event]:
         "https://gorodzovet.ru/taganrog/music/"
     ]
     today_str = date.today().strftime("%d.%m.%Y")
-
     for url in urls:
         soup = fetch_soup(url)
         if not soup:
             continue
-
         cards = soup.select(".event-card, .item, article")
         for card in cards:
             title_tag = card.select_one(".title, h3, .name")
             date_tag = card.select_one(".date, .event-date, time")
             link_tag = card.select_one("a[href]")
-
-            # Фильтруем только сегодняшние
             if date_tag and today_str not in date_tag.get_text():
                 continue
-
             if title_tag:
                 title = title_tag.get_text(strip=True)
                 href = link_tag.get("href") if link_tag else ""
                 if href and not href.startswith("http"):
                     href = "https://gorodzovet.ru" + href
-
                 events.append(Event(
                     category=Category.EVENTS,
                     title=title,
@@ -354,31 +327,25 @@ def parse_events() -> List[Event]:
                 ))
     return events
 
-# 6. Кассир.ру — дополнительный источник мероприятий
 def parse_kassir() -> List[Event]:
     events = []
     url = "https://rnd.kassir.ru/prigorody/taganrog"
     soup = fetch_soup(url)
     if not soup:
         return events
-
     today_str = date.today().strftime("%d.%m.%Y")
-
     cards = soup.select(".event-item, .ticket-card, .card")
     for card in cards:
         title_tag = card.select_one(".title, .name, h3")
         date_tag = card.select_one(".date, .session-date, time")
         link_tag = card.select_one("a[href]")
-
         if date_tag and today_str not in date_tag.get_text():
             continue
-
         if title_tag:
             title = title_tag.get_text(strip=True)
             href = link_tag.get("href") if link_tag else ""
             if href and not href.startswith("http"):
                 href = "https://rnd.kassir.ru" + href
-
             events.append(Event(
                 category=Category.EVENTS,
                 title=title,
@@ -399,7 +366,6 @@ def parse_kassir() -> List[Event]:
             ))
     return events
 
-# 7. Гринвич Парк (статичный блок)
 def parse_greenwich() -> List[Event]:
     return [Event(
         category=Category.GREENWICH,
@@ -420,7 +386,6 @@ def parse_greenwich() -> List[Event]:
         fallback_banner=os.path.join(BANNERS_DIR, "greenwich.jpg")
     )]
 
-# 8. Аквапарк (статичный блок)
 def parse_aqualazur() -> List[Event]:
     return [Event(
         category=Category.AQUALAZUR,
@@ -441,7 +406,6 @@ def parse_aqualazur() -> List[Event]:
         fallback_banner=os.path.join(BANNERS_DIR, "aqualazur.jpg")
     )]
 
-# 9. Голден Хорс (статичный блок)
 def parse_golden_horse() -> List[Event]:
     return [Event(
         category=Category.GOLDEN_HORSE,
@@ -464,9 +428,7 @@ def parse_golden_horse() -> List[Event]:
 
 # ===================== ФОРМАТТЕРЫ =====================
 def format_caption(event: Event) -> str:
-    """Возвращает текст подписи под фото"""
     lines = []
-
     if event.category == Category.THEATRE_MONTH:
         lines.append(f"🎭 <b>АФИША ТЕАТРА НА МЕСЯЦ</b>")
         lines.append(f"\n<b>{event.title}</b>")
@@ -476,7 +438,6 @@ def format_caption(event: Event) -> str:
         lines.append(f"🔗 {event.tickets_url}")
         lines.append(f"📞 {event.phone}")
         lines.append(f"\n#Таганрог #театр #афиша")
-
     elif event.category == Category.THEATRE_TODAY:
         lines.append(f"🎭 <b>ТЕАТР СЕГОДНЯ</b>")
         lines.append(f"\n<b>{event.title}</b>")
@@ -489,7 +450,6 @@ def format_caption(event: Event) -> str:
         lines.append(f"\n🔗 {event.tickets_url}")
         lines.append(f"📞 {event.phone}")
         lines.append(f"\n#Таганрог #театр #спектакль")
-
     elif event.category == Category.CINEMA:
         lines.append(f"🎬 <b>КИНОТЕАТР ЧАРЛИ</b>")
         lines.append(f"\n🎥 <b>{event.title}</b>")
@@ -499,7 +459,6 @@ def format_caption(event: Event) -> str:
         lines.append(f"💰 {event.prices}")
         lines.append(f"\n🔗 {event.tickets_url}")
         lines.append(f"\n#Таганрог #кино #чарли")
-
     elif event.category == Category.MUSEUM:
         lines.append(f"🎨 <b>МУЗЕИ И ВЫСТАВКИ</b>")
         lines.append(f"\n🖼️ <b>{event.title}</b>")
@@ -509,7 +468,6 @@ def format_caption(event: Event) -> str:
         lines.append(f"\n🔗 {event.tickets_url}")
         lines.append(f"📞 {event.phone}")
         lines.append(f"\n#Таганрог #музей #выставка")
-
     elif event.category == Category.EVENTS:
         lines.append(f"🎪 <b>СОБЫТИЯ И КОНЦЕРТЫ</b>")
         lines.append(f"\n<b>{event.title}</b>")
@@ -520,7 +478,6 @@ def format_caption(event: Event) -> str:
             lines.append(f"💰 {event.prices}")
         lines.append(f"\n🔗 {event.tickets_url}")
         lines.append(f"\n#Таганрог #афиша #концерт")
-
     elif event.category in (Category.GREENWICH, Category.AQUALAZUR, Category.GOLDEN_HORSE):
         emoji = "🌊" if event.category == Category.GREENWICH else "🎢" if event.category == Category.AQUALAZUR else "🐴"
         lines.append(f"{emoji} <b>{event.title.upper()}</b>")
@@ -532,45 +489,38 @@ def format_caption(event: Event) -> str:
         lines.append(f"\n🔗 {event.tickets_url}")
         lines.append(f"📞 {event.phone}")
         lines.append(f"\n#Таганрог #отдых #развлечения")
-
     return "\n".join(lines)
 
 # ===================== ОТПРАВКА =====================
 async def send_event(event: Event):
-    """Отправляет одно событие: фото + подпись"""
     bot = Bot(token=BOT_TOKEN)
     image_source = event.get_image_source()
-
     try:
         if image_source:
             await bot.send_photo(
-                chat_id=YOUR_CHAT_ID,
+                chat_id=CHAT_ID,
                 photo=image_source,
                 caption=format_caption(event),
                 parse_mode=ParseMode.HTML
             )
         else:
-            # Если вообще нет картинки — отправляем только текст
             await bot.send_message(
-                chat_id=YOUR_CHAT_ID,
+                chat_id=CHAT_ID,
                 text=format_caption(event),
                 parse_mode=ParseMode.HTML
             )
     except Exception as e:
         logger.error(f"Ошибка отправки '{event.title}': {e}")
-        # Fallback: пробуем отправить только текст
         try:
             await bot.send_message(
-                chat_id=YOUR_CHAT_ID,
+                chat_id=CHAT_ID,
                 text=format_caption(event),
                 parse_mode=ParseMode.HTML
             )
         except Exception as e2:
             logger.error(f"Повторная ошибка: {e2}")
 
-# ===================== ГЛАВНАЯ ЛОГИКА =====================
 def run_async(coro):
-    """Костыль для запуска async из синхронного кода"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     result = loop.run_until_complete(coro)
@@ -581,10 +531,8 @@ def process_and_send():
     logger.info("=" * 40)
     logger.info("Запуск сбора данных...")
     init_db()
-
     today = date.today()
     is_monday = today.weekday() == 0
-
     parsers = [
         ("theatre_month", parse_theatre_month, is_monday),
         ("theatre_today", parse_theatre_today, True),
@@ -596,48 +544,33 @@ def process_and_send():
         ("aqualazur", parse_aqualazur, True),
         ("golden_horse", parse_golden_horse, True),
     ]
-
     total_sent = 0
-
     for name, parser_func, is_active in parsers:
         if not is_active:
             logger.info(f"Блок {name}: пропущен (не активен)")
             continue
-
         try:
             events = parser_func()
             sent_count = 0
-
             for event in events:
                 key = event.get_unique_key()
                 if not is_event_sent(key):
                     run_async(send_event(event))
                     mark_event_sent(key)
                     sent_count += 1
-                    time.sleep(1.5)  # Щадим API Telegram
-
+                    time.sleep(1.5)
             logger.info(f"Блок {name}: {len(events)} событий, отправлено новых: {sent_count}")
             total_sent += sent_count
-
         except Exception as e:
             logger.error(f"Ошибка парсера {name}: {e}", exc_info=True)
-
     logger.info(f"Всего отправлено новых событий: {total_sent}")
     logger.info("=" * 40)
 
 def main():
-    logger.info("Бот запущен.")
+    logger.info("Бот запущен (одноразовый запуск).")
     init_db()
-
-    # Для немедленного теста — раскомментируй следующую строку:
-    # process_and_send()
-
-    schedule.every().day.at("09:00").do(process_and_send)
-    logger.info("Расписание: каждый день в 09:00 МСК")
-
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+    process_and_send()
+    logger.info("Работа завершена.")
 
 if __name__ == "__main__":
-    process_and_send()
+    main()
