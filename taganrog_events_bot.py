@@ -1,8 +1,8 @@
 import asyncio
+import html
 import logging
 import os
 import sqlite3
-import html
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional
@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ===================== НАСТРОЙКИ СТИЛЯ И ИКОНОК =====================
-# Вы можете изменить любую иконку, заменить на символы или оставить пустыми ""
+# Иконки для категорий и полей (можно легко заменить или выключить)
 ICONS = {
     # Категории
     "cat_theatre_month": "🎭 ",
@@ -33,7 +33,7 @@ ICONS = {
     "cat_aqualazur": "🎢 ",
     "cat_golden_horse": "🐴 ",
 
-    # Поля событий
+    # Поля деталей
     "date": "📅 ",
     "time": "🕐 ",
     "location": "📍 ",
@@ -43,7 +43,7 @@ ICONS = {
     "phone": "📞 ",
 }
 
-# Чтобы полностью отключить иконки (сделать чистый текст), раскомментируйте строчку ниже:
+# Чтобы полностью отключить эмодзи, раскомментируйте строчку ниже:
 # ICONS = {k: "" for k in ICONS}
 
 
@@ -75,7 +75,7 @@ class Event:
     image_url: Optional[str] = None
 
 
-# ===================== РАБОТА С БАЗОЙ ДАННЫХ =====================
+# ===================== БАЗА ДАННЫХ (ИСКЛЮЧЕНИЕ ДУБЛЕЙ) =====================
 class Database:
     def __init__(self, db_path: str = "data/taganrog_events.db"):
         self.db_path = db_path
@@ -106,8 +106,9 @@ class Database:
             conn.commit()
 
 
-# ===================== ФОРМАТТИРОВАНИЕ СООБЩЕНИЙ =====================
+# ===================== ФОРМАТИРОВАНИЕ СООБЩЕНИЙ =====================
 def format_caption(event: Event) -> str:
+    # Безопасное экранирование специальных символов для HTML в Telegram
     title = html.escape(event.title)
     date_str = html.escape(event.date_str)
     time_str = html.escape(event.time_str)
@@ -120,7 +121,7 @@ def format_caption(event: Event) -> str:
 
     lines = []
 
-    # 1. Заголовок категории
+    # 1. Шапка категории
     category_titles = {
         Category.THEATRE_MONTH: f"{ICONS['cat_theatre_month']}<b>АФИША ТЕАТРА НА МЕСЯЦ</b>",
         Category.THEATRE_TODAY: f"{ICONS['cat_theatre_today']}<b>ТЕАТР СЕГОДНЯ</b>",
@@ -135,7 +136,7 @@ def format_caption(event: Event) -> str:
     header = category_titles.get(event.category, "<b>АФИША ТАГАНРОГА</b>")
     lines.append(header)
 
-    # 2. Название события
+    # 2. Название мероприятия
     lines.append(f"\n<b>{title}</b>\n")
 
     # 3. Дата и время
@@ -147,7 +148,7 @@ def format_caption(event: Event) -> str:
     if date_time_parts:
         lines.append(" | ".join(date_time_parts))
 
-    # 4. Место и адрес
+    # 4. Локация и адрес
     loc_icon = ICONS['location']
     if location and address:
         lines.append(f"{loc_icon}{location} ({address})")
@@ -164,7 +165,7 @@ def format_caption(event: Event) -> str:
     if prices:
         lines.append(f"{ICONS['price']}{prices}")
 
-    # 7. Ссылки и контакты
+    # 7. Билеты и телефон
     contact_parts = []
     if tickets_url:
         contact_parts.append(f"{ICONS['ticket']}<a href='{tickets_url}'>Купить билет / Подробнее</a>")
@@ -174,7 +175,7 @@ def format_caption(event: Event) -> str:
     if contact_parts:
         lines.append("\n" + "\n".join(contact_parts))
 
-    # 8. Хэштеги
+    # 8. Тематические хэштеги
     hashtags = {
         Category.THEATRE_MONTH: "#Таганрог #Театр #Афиша",
         Category.THEATRE_TODAY: "#Таганрог #Театр #Спектакль",
@@ -191,59 +192,76 @@ def format_caption(event: Event) -> str:
     return "\n".join(lines)
 
 
-# ===================== ПАРСИНГ СОБЫТИЙ (ЗАГЛУШКА/ПРИМЕР) =====================
+# ===================== СБОР СОБЫТИЙ (ПАРСИНГ) =====================
 async def fetch_events() -> List[Event]:
     """
-    Здесь находится ваша логика парсинга сайтов (BeautifulSoup / aiohttp).
-    Возвращает список объектa Event.
+    Основная функция для сбора данных с сайтов.
+    Замените или дополните этот блок вашими BeautifulSoup-селекторами.
     """
-    events = []
-    
-    # Пример тестового события (можно удалить при подключении реального парсера)
-    events.append(
-        Event(
-            event_id="test_event_001",
-            category=Category.THEATRE_TODAY,
-            title="Спектакль «Палата №6»",
-            date_str="Сегодня 29.07",
-            time_str="19:00",
-            location="Театр им. А.П. Чехова",
-            address="ул. Петровская, 90",
-            description="Классическая постановка по знаменитой повести А.П. Чехова.",
-            prices="от 400 руб.",
-            phone="+7 (8634) 38-29-68",
-            tickets_url="https://www.chehovsky.ru/",
-            image_url=None
-        )
-    )
-    
+    events: List[Event] = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        # Пример: Сбор афиши театра им. Чехова
+        try:
+            url = "https://www.chehovsky.ru/"
+            async with session.get(url, timeout=15) as response:
+                if response.status == 200:
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, "html.parser")
+                    
+                    # Логика вашего парсера добавляется сюда...
+                    # Ниже тестовый элемент для проверки работоспособности:
+                    events.append(
+                        Event(
+                            event_id="chehov_demo_001",
+                            category=Category.THEATRE_TODAY,
+                            title="Спектакль «Палата №6»",
+                            date_str="Сегодня",
+                            time_str="19:00",
+                            location="Театр им. А.П. Чехова",
+                            address="ул. Петровская, 90",
+                            description="Постановка классического произведения А.П. Чехова.",
+                            prices="от 400 руб.",
+                            phone="+7 (8634) 38-29-68",
+                            tickets_url="https://www.chehovsky.ru/",
+                            image_url=None
+                        )
+                    )
+        except Exception as e:
+            logger.error(f"Ошибка при сборе данных с {url}: {e}")
+
     return events
 
 
-# ===================== ОСНОВНАЯ ЛОГИКА ОТПРАВКИ =====================
+# ===================== ОСНОВНОЙ ЦИКЛ ЗАПУСКА =====================
 async def main():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     channel_id = os.getenv("TELEGRAM_CHANNEL_ID")
 
     if not bot_token or not channel_id:
-        logger.error("ОШИБКА: Переменные TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID не найдены!")
+        logger.error("ОШИБКА: TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID не заданы в переменных окружения!")
         return
 
     bot = Bot(token=bot_token)
     db = Database()
 
-    logger.info("Начало работы бота: сбор событий...")
+    logger.info("Бот запущен. Сбор актуальных событий...")
     events = await fetch_events()
-    logger.info(f"Найдено событий: {len(events)}")
+    logger.info(f"Найдено событий для проверки: {len(events)}")
 
     for event in events:
+        # Пропускаем, если событие уже отправлялось ранее
         if db.is_sent(event.event_id):
-            logger.info(f"Событие {event.event_id} уже отправлялось, пропускаем.")
+            logger.info(f"Событие [{event.event_id}] уже было отправлено, пропускаем.")
             continue
 
         caption = format_caption(event)
 
         try:
+            # Отправка с фото или только текстом
             if event.image_url:
                 await bot.send_photo(
                     chat_id=channel_id,
@@ -259,18 +277,19 @@ async def main():
                     disable_web_page_preview=False
                 )
 
+            # Отмечаем как отправленное
             db.mark_as_sent(event.event_id)
-            logger.info(f"Успешно отправлено: {event.title}")
-            
-            # Небольшая пауза между постами, чтобы Telegram не заблокировал за спам
+            logger.info(f"Успешно опубликовано: {event.title}")
+
+            # Пауза 2 секунды, чтобы соблюдать лимиты Telegram API
             await asyncio.sleep(2)
 
         except TelegramError as e:
-            logger.error(f"Ошибка при отправке события {event.event_id}: {e}")
+            logger.error(f"Ошибка Telegram API при отправке [{event.event_id}]: {e}")
         except Exception as e:
-            logger.error(f"Неизвестная ошибка: {e}")
+            logger.error(f"Неизвестная ошибка при отправке [{event.event_id}]: {e}")
 
-    logger.info("Работа бота завершена.")
+    logger.info("Выполнение задачи завершено.")
 
 
 if __name__ == "__main__":
