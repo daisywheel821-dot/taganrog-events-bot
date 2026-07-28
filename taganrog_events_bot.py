@@ -18,8 +18,9 @@ from telegram.error import TelegramError
 # ==========================================
 # НАСТРОЙКИ (ЗАМЕНИ НА СВОИ)
 # ==========================================
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-YOUR_CHAT_ID = "YOUR_CHAT_ID"  # или @username канала
+import os
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+YOUR_CHAT_ID = os.environ.get("CHAT_ID") # или @username канала
 # ==========================================
 
 logging.basicConfig(
