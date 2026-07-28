@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 from enum import Enum
 
-from telegram import Bot, ParseMode, InputMediaPhoto
+from telegram import Bot, InputMediaPhoto
+from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 # ==========================================
