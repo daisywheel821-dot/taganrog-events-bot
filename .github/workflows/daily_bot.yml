@@ -4,26 +4,26 @@ on:
   schedule:
     # Каждый день в 6:00 UTC = 9:00 по Москве
     - cron: '0 6 * * *'
-  workflow_dispatch:  # Это позволит запускать вручную для теста
+  workflow_dispatch:  # Позволяет запускать вручную со страницы Actions
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
 
     steps:
-     - name: Checkout repository
-       uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-     - name: Set up Python
-       uses: actions/setup-python@v5 # <-- Замените v4 на v5
-       with:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
           python-version: '3.11'
 
-     - name: Установить зависимости
-       run: pip install python-telegram-bot requests beautifulsoup4 lxml schedule
+      - name: Установить зависимости
+        run: pip install python-telegram-bot requests beautifulsoup4 lxml
 
-     - name: Запустить бота
-       env:
+      - name: Запустить бота
+        env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-       run: python taganrog_events_bot.py
+        run: python taganrog_events_bot.py
