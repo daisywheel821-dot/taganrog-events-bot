@@ -1,0 +1,29 @@
+name: Ежедневная афиша Таганрога
+
+on:
+  schedule:
+    # Каждый день в 6:00 UTC = 9:00 по Москве
+    - cron: '0 6 * * *'
+  workflow_dispatch:  # Это позволит запускать вручную для теста
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Скачать репозиторий
+        uses: actions/checkout@v4
+
+      - name: Установить Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Установить зависимости
+        run: pip install python-telegram-bot requests beautifulsoup4 lxml schedule
+
+      - name: Запустить бота
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python taganrog_events_bot.py
