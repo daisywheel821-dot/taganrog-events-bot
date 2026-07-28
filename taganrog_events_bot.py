@@ -559,8 +559,9 @@ async def send_event(bot: Bot, event: Event):
     image_source = event.get_image_source()
     caption_text = format_caption(event)
 
-    try:
-        if image_source:
+    sent = False
+    if image_source:
+        try:
             if image_source.startswith("http"):
                 await bot.send_photo(
                     chat_id=CHAT_ID,
@@ -568,7 +569,8 @@ async def send_event(bot: Bot, event: Event):
                     caption=caption_text,
                     parse_mode=ParseMode.HTML,
                 )
-            else:
+                sent = True
+            elif os.path.exists(image_source):
                 with open(image_source, "rb") as photo_file:
                     await bot.send_photo(
                         chat_id=CHAT_ID,
@@ -576,14 +578,11 @@ async def send_event(bot: Bot, event: Event):
                         caption=caption_text,
                         parse_mode=ParseMode.HTML,
                     )
-        else:
-            await bot.send_message(
-                chat_id=CHAT_ID,
-                text=caption_text,
-                parse_mode=ParseMode.HTML,
-            )
-    except Exception as e:
-        logger.error(f"Ошибка отправки '{event.title}': {e}")
+                    sent = True
+        except Exception as e:
+            logger.warning(f"Не удалось отправить фото для '{event.title}': {e}. Отправка текстом...")
+
+    if not sent:
         try:
             await bot.send_message(
                 chat_id=CHAT_ID,
@@ -591,7 +590,7 @@ async def send_event(bot: Bot, event: Event):
                 parse_mode=ParseMode.HTML,
             )
         except Exception as e2:
-            logger.error(f"Повторная ошибка при отправке сообщением: {e2}")
+            logger.error(f"Повторная ошибка при отправке сообщением '{event.title}': {e2}")
 
 
 async def process_and_send():
