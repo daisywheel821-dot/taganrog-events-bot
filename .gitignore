@@ -1,43 +1,46 @@
 # Environment variables with sensitive data
-   .env
-   .env.local
+.env
+.env.local
 
-   # Python
-   __pycache__/
-   *.py[cod]
-   *$py.class
-   *.so
-   .Python
-   env/
-   venv/
-   ENV/
-   build/
-   develop-eggs/
-   dist/
-   downloads/
-   eggs/
-   .eggs/
-   lib/
-   lib64/
-   parts/
-   sdist/
-   var/
-   wheels/
-   *.egg-info/
-   .installed.cfg
-   *.egg
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-   # IDE
-   .vscode/
-   .idea/
-   *.swp
-   *.swo
-   *~
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-   # OS
-   .DS_Store
-   Thumbs.db
+# OS
+.DS_Store
+Thumbs.db
 
-   # Logs
-   *.log
-   logs/
+# Logs
+*.log
+logs/
+
+# Исключения для базы данных бота (добавлено в конец)
+!data/taganrog_events.db
