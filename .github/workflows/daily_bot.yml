@@ -11,19 +11,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Скачать репозиторий
-        uses: actions/checkout@v4
+     - name: Checkout repository
+       uses: actions/checkout@v4
 
-      - name: Установить Python
-        uses: actions/setup-python@v4
-        with:
+     - name: Set up Python
+       uses: actions/setup-python@v5 # <-- Замените v4 на v5
+       with:
           python-version: '3.11'
 
-      - name: Установить зависимости
-        run: pip install python-telegram-bot requests beautifulsoup4 lxml schedule
+     - name: Установить зависимости
+       run: pip install python-telegram-bot requests beautifulsoup4 lxml schedule
 
-      - name: Запустить бота
-        env:
+     - name: Запустить бота
+       env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python taganrog_events_bot.py
+       run: python taganrog_events_bot.py
