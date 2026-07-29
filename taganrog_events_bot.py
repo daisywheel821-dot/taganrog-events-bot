@@ -28,7 +28,7 @@ STRICT_SOUVENIR_WORDS = [
     "музейный магазин", "прейскурант цен на товары", "каталог сувениров"
 ]
 
-# Исключаем общий справочный номер музея (38-34-96)
+# Жесткий фильтр для общего справочного номера музея (38-34-96)
 EXCLUDED_PHONES = ["383496", "38-34-96"]
 
 MUSEUM_BRANCHES = [
@@ -39,7 +39,7 @@ MUSEUM_BRANCHES = [
         "tag": "#ЛитературныйМузейЧехова"
     },
     {
-        "keys": ["юрНКц", "южно-российский"],
+        "keys": ["юрнкц", "южно-российский"],
         "name": "ЮРНКЦ А.П. Чехова",
         "address": "ул. Октябрьская, 9",
         "tag": "#ЮРНКЦЧехова"
@@ -157,7 +157,7 @@ def extract_all_phones(text: str) -> List[tuple]:
         if not digits:
             continue
 
-        # Фильтр: пропускаем общий номер музея 38-34-96
+        # Гарантированный фильтр общего номера музея (38-34-96)
         if any(ex in digits for ex in EXCLUDED_PHONES):
             continue
 
@@ -199,7 +199,7 @@ def generate_museum_tags(text: str, branch_tag: str) -> List[str]:
         tags.append("#творчество")
     if "выставк" in text_lower or "экспозиц" in text_lower:
         tags.append("#выставка")
-    if "программ" in text_lower or "экскурси" in text_lower:
+    if "программ" in text_lower or "экскурси" in text_lower or "лекци" in text_lower:
         tags.append("#программы")
 
     tags.extend(["#Таганрог", "#афиша"])
@@ -227,7 +227,7 @@ def format_caption(event: Event) -> str:
         lines.append("<b>ТАГАНРОГСКИЙ ТЕАТР ИМ. А.П. ЧЕХОВА</b>")
         lines.append("<i>Репертуар и анонс спектаклей</i>\n")
     elif event.category == Category.MUSEUM:
-        lines.append("<b>МУЗЕИ И ВЫСТАВКИ ТАГАНРОГА</b>")
+        lines.append("<b>МЕРОПРИЯТИЯ МУЗЕЕВ ТАГАНРОГА</b>")
         lines.append("<i>Таганрогский музей-заповедник</i>\n")
 
     lines.append(f"<b>{title}</b>\n")
@@ -248,7 +248,7 @@ def format_caption(event: Event) -> str:
     if address:
         lines.append(f"{address}.")
 
-    # Номер(а) телефона с иконкой — каждый с новой строки
+    # Вывод телефонов списком (каждый с новой строки)
     if event.phones:
         lines.append("\n📞 <b>Справки и запись:</b>")
         for disp, tel in event.phones:
@@ -345,7 +345,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                 soup = BeautifulSoup(html_text, "html.parser")
 
-                # ПОИСК ТОЧНОЙ ССЫЛКИ НА СТРАНИЦУ ПОКУПКИ В VMUZEY
+                # Сбор прямой ссылки на Vmuzey (если есть)
                 for a_tag in soup.find_all("a", href=True):
                     href = a_tag["href"].strip()
                     link_text = a_tag.get_text(strip=True).lower()
@@ -360,7 +360,11 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                             data["buy_ticket_url"] = href
 
                 content_block = soup.select_one(".detail-text, .news-detail, .content-text, .detail_text, .workarea, .content")
-                full_text = ""
+                
+                # Поиск номеров по всему тексту страницы (чтобы не упустить мобильные и прямые контакты)
+                page_full_text = soup.get_text()
+                data["phones"] = extract_all_phones(page_full_text)
+
                 if content_block:
                     for s in content_block(["script", "style"]):
                         s.extract()
@@ -387,12 +391,8 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                         desc_parts.append("📌 <b>Важно:</b>\n" + "\n".join([f"• {note}" for note in important_notes]))
 
                     data["description"] = "\n\n".join(desc_parts)
-                    full_text = " ".join(paragraphs + important_notes)
 
-                if not full_text:
-                    full_text = soup.get_text()
-
-                text_to_check = full_text.lower()
+                text_to_check = page_full_text.lower()
                 for branch in MUSEUM_BRANCHES:
                     if any(k in text_to_check for k in branch["keys"]):
                         data["location"] = branch["name"]
@@ -400,19 +400,17 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                         data["branch_tag"] = branch["tag"]
                         break
 
-                date_match = re.search(r"((?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье)?,?\s*\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))", full_text, re.I)
+                date_match = re.search(r"((?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье)?,?\s*\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))", page_full_text, re.I)
                 if date_match:
                     data["date_str"] = date_match.group(1).capitalize()
 
-                time_match = re.search(r"\bв\s*(\d{1,2}[\.\:]\d{2})\b", full_text, re.I)
+                time_match = re.search(r"\bв\s*(\d{1,2}[\.\:]\d{2})\b", page_full_text, re.I)
                 if time_match:
                     data["time_str"] = time_match.group(1).replace(".", ":")
 
-                price_match = re.search(r"(?:стоимость[^\d]*?|билет[а-я]*\s*–?\s*)(\d+\s*руб[а-я]*)", full_text, re.I)
+                price_match = re.search(r"(?:стоимость[^\d]*?|билет[а-я]*\s*–?\s*)(\d+\s*руб[а-я]*)", page_full_text, re.I)
                 if price_match:
                     data["prices"] = price_match.group(1)
-
-                data["phones"] = extract_all_phones(full_text)
 
     except Exception as e:
         logger.warning(f"Ошибка получения деталей страницы {detail_url}: {e}")
@@ -531,7 +529,7 @@ async def main():
             caption = format_caption(event)
             photo_sent = False
 
-            # Инлайн-кнопка для прямой ссылки на Vmuzey
+            # Инлайн-кнопка отправляется строго ТОЛЬКО если есть рабочая ссылка Vmuzey
             reply_markup = None
             if event.buy_ticket_url and "vmuzey.com" in event.buy_ticket_url:
                 keyboard = [[InlineKeyboardButton("🎫 Купить билет (Пушкинская карта)", url=event.buy_ticket_url)]]
