@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import re
 import sqlite3
 import html
 import io
@@ -23,16 +22,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ТОЧНЫЙ СПИСОК СУВЕНИРНЫХ СТОП-СЛОВ (Без ложных срабатываний на мастер-классы!)
-STRICT_SOUVENIR_WORDS = [
-    "сувенирная продукция", "купить сувенир", "в продаже сувениры",
-    "товарная лавка", "музейный магазин", "прейскурант цен на товары",
-    "цена кружки", "купить открытку", "каталог сувениров"
-]
 
-
+# ===================== МОДЕЛИ ДАННЫХ =====================
 class Category(Enum):
-    THEATRE = "THEATRE"
+    THEATRE_MONTH = "THEATRE_MONTH"
     MUSEUM = "MUSEUM"
 
 
@@ -40,9 +33,7 @@ class Category(Enum):
 class Event:
     event_id: str
     category: Category
-    event_type: str
     title: str
-    age_limit: str = ""
     date_str: str = ""
     time_str: str = ""
     location: str = ""
@@ -50,11 +41,11 @@ class Event:
     description: str = ""
     prices: str = ""
     phone: str = ""
-    is_preorder_required: bool = False
     tickets_url: str = ""
     image_url: Optional[str] = None
 
 
+# ===================== РАБОТА С БАЗОЙ ДАННЫХ =====================
 class Database:
     def __init__(self, db_path: str = "data/taganrog_events.db"):
         self.db_path = db_path
@@ -72,13 +63,6 @@ class Database:
             """)
             conn.commit()
 
-    def clear_all(self):
-        """Очистка базы для проверки"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM sent_events")
-            conn.commit()
-
     def is_sent(self, event_id: str) -> bool:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -92,14 +76,9 @@ class Database:
             conn.commit()
 
 
-# ===================== ИДЕАЛЬНОЕ ФОРМАТИРОВАНИЕ СООБЩЕНИЯ =====================
+# ===================== ФОРМАТИРОВАНИЕ СООБЩЕНИЙ =====================
 def format_caption(event: Event) -> str:
     title = html.escape(event.title.strip())
-    event_type = html.escape(event.event_type.strip())
-    
-    # Возраст показываем ТОЛЬКО если он действительно есть на странице
-    age_str = f" ({html.escape(event.age_limit.strip())})" if event.age_limit else ""
-    
     date_str = html.escape(event.date_str.strip())
     time_str = html.escape(event.time_str.strip())
     location = html.escape(event.location.strip())
@@ -111,22 +90,23 @@ def format_caption(event: Event) -> str:
 
     lines = []
 
-    # 1. Шапка
-    if event.category == Category.THEATRE:
+    if event.category == Category.THEATRE_MONTH:
         lines.append("<b>ТАГАНРОГСКИЙ ТЕАТР ИМ. А.П. ЧЕХОВА</b>")
-    else:
-        lines.append("<b>ТАГАНРОГСКИЙ МУЗЕЙ-ЗАПОВЕДНИК</b>")
-    
-    lines.append(f"<i>{event_type}{age_str}</i>\n")
+        lines.append("<i>Репертуар и анонс спектаклей</i>\n")
+    elif event.category == Category.MUSEUM:
+        lines.append("<b>МУЗЕИ И ВЫСТАВКИ ТАГАНРОГА</b>")
+        lines.append("<i>Таганрогский музей-заповедник</i>\n")
+
     lines.append(f"<b>{title}</b>\n")
 
-    # 2. Дата и время
+    date_parts = []
     if date_str:
-        lines.append(f"<b>Дата:</b> {date_str}")
+        date_parts.append(f"<b>Дата:</b> {date_str}")
     if time_str:
-        lines.append(f"<b>Время:</b> {time_str}")
+        date_parts.append(f"<b>Время:</b> {time_str}")
+    if date_parts:
+        lines.append(" | ".join(date_parts))
 
-    # 3. Локация и адрес
     if location and address:
         lines.append(f"<b>Место:</b> {location} ({address})")
     elif location:
@@ -134,108 +114,90 @@ def format_caption(event: Event) -> str:
     elif address:
         lines.append(f"<b>Адрес:</b> {address}")
 
-    # 4. Стоимость
     if prices:
         lines.append(f"<b>Стоимость:</b> {prices}")
 
-    # 5. Описание (курсивом)
     if description:
-        short_desc = description[:350] + "..." if len(description) > 350 else description
-        lines.append(f"\n<i>{short_desc}</i>")
+        lines.append(f"\n{description}")
 
-    # 6. Кликабельный телефон с новой строки
-    if phone:
-        clean_phone = re.sub(r"[^\d+]", "", phone)
-        lines.append(f"\n<b>Телефон для справок:</b>\n<a href='tel:{clean_phone}'>{phone}</a>")
-
-    # 7. Ссылка на событие
+    links = []
     if tickets_url:
-        action_text = "Записаться на мероприятие" if event.is_preorder_required else "Подробности и билеты"
-        lines.append(f"\n👉 <a href='{tickets_url}'><b>{action_text}</b></a>")
+        links.append(f"<a href='{tickets_url}'>Официальная страница / Билеты</a>")
+    if phone:
+        links.append(f"<b>Справки по телефону:</b> {phone}")
 
-    # 8. Хэштеги
-    tags = ["#Таганрог", "#АфишаТаганрог"]
-    if event.category == Category.THEATRE:
-        tags.extend(["#ТеатрЧехова", "#Театр"])
+    if links:
+        lines.append("\n" + "\n".join(links))
+
+    if event.category == Category.THEATRE_MONTH:
+        lines.append("\n#Таганрог #ТеатрЧехова #Афиша")
     else:
-        tags.extend(["#Музей", "#Выставка"])
-
-    lines.append("\n" + " ".join(tags))
+        lines.append("\n#Таганрог #Музей #Выставка")
 
     return "\n".join(lines)
 
 
-def is_souvenir(title: str, text: str) -> bool:
-    check_str = (title + " " + text).lower()
-    return any(word in check_str for word in STRICT_SOUVENIR_WORDS)
+# ===================== ПАРСИНГ =====================
+async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
+    events = []
+    url = "https://www.chehovsky.ru/afishateatra/"
+    base_url = "https://www.chehovsky.ru"
 
-
-# ===================== ПАРСИНГ ДЕТАЛЕЙ МУЗЕЯ (ТГЛИАМЗ) =====================
-async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) -> dict:
-    data = {
-        "description": "",
-        "image_url": None,
-        "location": "",
-        "date_str": "",
-        "time_str": "",
-        "phone": "+7 (8634) 38-34-96",
-        "age_limit": "",
-        "is_souvenir": False
-    }
     try:
-        async with session.get(detail_url, timeout=12) as resp:
-            if resp.status == 200:
-                html_text = await resp.text()
-                soup = BeautifulSoup(html_text, "html.parser")
+        async with session.get(url, timeout=15) as response:
+            if response.status == 200:
+                html_content = await response.text()
+                soup = BeautifulSoup(html_content, "html.parser")
 
-                page_title = soup.find("h1")
-                title_str = page_title.get_text(strip=True) if page_title else ""
-                if is_souvenir(title_str, html_text):
-                    data["is_souvenir"] = True
-                    return data
+                cards = soup.select(".afisha-item, .event-item, .views-row, tr.afisha_row")
+                for card in cards:
+                    title_el = card.select_one(".title, .name, h3, h4, .afisha_title, .field-name-title")
+                    date_el = card.select_one(".date, .afisha_date, .field-name-field-date")
+                    time_el = card.select_one(".time, .afisha_time")
+                    price_el = card.select_one(".price, .afisha_price")
+                    img_el = card.select_one("img")
+                    link_el = card.select_one("a[href]")
 
-                # Ищем полноразмерную афишу из Битрикса (/upload/)
-                for img in soup.find_all("img"):
-                    src = img.get("src", "")
-                    if "/upload/" in src and not any(x in src for x in ["icon", "logo", "menu", "banner"]):
-                        data["image_url"] = urljoin("https://tgliamz.ru", src)
-                        break
+                    if title_el:
+                        title = title_el.get_text(strip=True)
+                        date_str = date_el.get_text(strip=True) if date_el else ""
+                        time_str = time_el.get_text(strip=True) if time_el else ""
+                        prices = price_el.get_text(strip=True) if price_el else "Уточняйте в кассе"
 
-                # Извлечение даты и времени из текста страницы
-                date_match = re.search(r"(\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+\d{4})?)", html_text, re.IGNORECASE)
-                if date_match:
-                    data["date_str"] = date_match.group(1)
+                        tickets_url = url
+                        if link_el and link_el.get("href"):
+                            tickets_url = urljoin(base_url, link_el["href"])
 
-                time_match = re.search(r"(\b\d{1,2}[:.-]\d{2}\b|\b\d{1,2}\s*ч(?:асов)?\b)", html_text, re.IGNORECASE)
-                if time_match:
-                    data["time_str"] = time_match.group(1)
+                        image_url = None
+                        if img_el and img_el.get("src"):
+                            image_url = urljoin(base_url, img_el["src"])
 
-                # Поиск филиала музея
-                content_block = soup.select_one(".content, .news-detail, .workarea, #content")
-                if content_block:
-                    paragraphs = [p.get_text(strip=True) for p in content_block.find_all("p") if len(p.get_text(strip=True)) > 15]
-                    if paragraphs:
-                        data["description"] = "\n\n".join(paragraphs[:2])
+                        event_id = f"chehov_{hash(title + date_str)}"
 
-                # Поиск возраста
-                age_match = re.search(r"\b(\d{1,2}\+)\b", html_text)
-                if age_match:
-                    data["age_limit"] = age_match.group(1)
-
-                # Поиск локального телефона филиала
-                phone_match = re.search(r"(\+?7|8)[\s\(\-]*\d{3}[\s\)\-]*\d{2,3}[\s\-]*\d{2}[\s\-]*\d{2}", html_text)
-                if phone_match:
-                    data["phone"] = phone_match.group(0)
-
+                        events.append(
+                            Event(
+                                event_id=event_id,
+                                category=Category.THEATRE_MONTH,
+                                title=title,
+                                date_str=date_str,
+                                time_str=time_str,
+                                location="Театр им. А.П. Чехова",
+                                address="ул. Петровская, 90",
+                                prices=prices,
+                                phone="+7 (8634) 38-29-68",
+                                tickets_url=tickets_url,
+                                image_url=image_url
+                            )
+                        )
     except Exception as e:
-        logger.warning(f"Ошибка деталей [{detail_url}]: {e}")
-    
-    return data
+        logger.error(f"Ошибка парсинга Театра Чехова: {e}")
+
+    return events
 
 
 async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
     events = []
-    url = "https://tgliamz.ru/calendar/index.php"
+    url = "https://tgliamz.ru/calendar/"
     base_url = "https://tgliamz.ru"
 
     try:
@@ -244,166 +206,110 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                 html_content = await response.text()
                 soup = BeautifulSoup(html_content, "html.parser")
 
-                links = soup.find_all("a", href=re.compile(r"detaill\.php|ELEMENT_ID="))
-                visited_urls = set()
-
-                for link in links:
-                    href = link.get("href")
-                    if not href:
-                        continue
-
-                    full_url = urljoin(base_url, href)
-                    if full_url in visited_urls:
-                        continue
-                    visited_urls.add(full_url)
-
-                    title = link.get_text(strip=True)
-                    if len(title) < 4 or "подробнее" in title.lower():
-                        parent = link.find_parent(["div", "tr", "li", "td"])
-                        if parent:
-                            title_el = parent.find(["h2", "h3", "h4", "b", "strong"])
-                            if title_el:
-                                title = title_el.get_text(strip=True)
-
-                    if len(title) < 4:
-                        continue
-
-                    detail_data = await parse_tgliamz_detail(session, full_url)
-
-                    if detail_data["is_souvenir"]:
-                        logger.info(f"Пропущен сувенир: {title}")
-                        continue
-
-                    # Определяем тип мероприятия
-                    event_type = "Выставка"
-                    t_lower = title.lower()
-                    if "концерт" in t_lower or "джаз" in t_lower or "музыка" in t_lower:
-                        event_type = "Концерт"
-                    elif "мастер-класс" in t_lower or "пленэр" in t_lower:
-                        event_type = "Мастер-класс"
-                    elif "лекция" in t_lower:
-                        event_type = "Лекция"
-
-                    elem_id_match = re.search(r"ELEMENT_ID=(\d+)", full_url)
-                    event_id = f"tgliamz_{elem_id_match.group(1)}" if elem_id_match else f"tgliamz_{hash(title)}"
-
-                    events.append(
-                        Event(
-                            event_id=event_id,
-                            category=Category.MUSEUM,
-                            event_type=event_type,
-                            title=title,
-                            age_limit=detail_data["age_limit"],
-                            date_str=detail_data["date_str"],
-                            time_str=detail_data["time_str"],
-                            location=detail_data["location"] or "Таганрогский музей-заповедник",
-                            description=detail_data["description"],
-                            phone=detail_data["phone"],
-                            tickets_url=full_url,
-                            image_url=detail_data["image_url"]
-                        )
-                    )
-    except Exception as e:
-        logger.error(f"Ошибка афиши ТГЛИАМЗ: {e}")
-
-    return events
-
-
-# ===================== ПАРСИНГ ТЕАТРА ЧЕХОВА =====================
-async def parse_chekhov_theatre(session: aiohttp.ClientSession) -> List[Event]:
-    events = []
-    url = "https://www.chekhovteatr.rus/afisha"
-    try:
-        async with session.get(url, timeout=15) as response:
-            if response.status == 200:
-                html_content = await response.text()
-                soup = BeautifulSoup(html_content, "html.parser")
-                
-                # Поиск спектаклей на сайте театра
-                items = soup.select(".afisha-item, .event-card, .performance")
+                items = soup.select(".news-item, .event-card, .calendar-item, .item, .col-md-4, .col-sm-6")
                 for item in items:
-                    title_el = item.select_one(".title, h3, h2")
-                    if not title_el:
-                        continue
-                    title = title_el.get_text(strip=True)
-                    
-                    link_el = item.find("a")
-                    tickets_url = urljoin(url, link_el["href"]) if link_el and link_el.get("href") else url
+                    title_el = item.select_one(".title, .name, h2, h3, h4")
+                    date_el = item.select_one(".date, .time")
+                    loc_el = item.select_one(".location, .place, .museum-title")
+                    img_el = item.select_one("img")
+                    link_el = item.select_one("a[href]")
 
-                    img_el = item.find("img")
-                    image_url = urljoin(url, img_el["src"]) if img_el and img_el.get("src") else None
+                    if title_el:
+                        title = title_el.get_text(strip=True)
+                        if len(title) < 3:
+                            continue
 
-                    events.append(
-                        Event(
-                            event_id=f"theatre_{hash(title)}",
-                            category=Category.THEATRE,
-                            event_type="Спектакль",
-                            title=title,
-                            address="ул. Петровская, 90",
-                            phone="+7 (8634) 38-35-73",
-                            tickets_url=tickets_url,
-                            image_url=image_url
+                        date_str = date_el.get_text(strip=True) if date_el else "Действующая выставка"
+                        location = loc_el.get_text(strip=True) if loc_el else "Таганрогский музей-заповедник"
+
+                        tickets_url = url
+                        if link_el and link_el.get("href"):
+                            tickets_url = urljoin(base_url, link_el["href"])
+
+                        image_url = None
+                        if img_el and img_el.get("src"):
+                            src = img_el["src"]
+                            image_url = urljoin(base_url, src)
+
+                        event_id = f"tgliamz_{hash(title + date_str)}"
+
+                        events.append(
+                            Event(
+                                event_id=event_id,
+                                category=Category.MUSEUM,
+                                title=title,
+                                date_str=date_str,
+                                location=location,
+                                tickets_url=tickets_url,
+                                image_url=image_url
+                            )
                         )
-                    )
     except Exception as e:
-        logger.warning(f"Ошибка парсинга Театра Чехова: {e}")
+        logger.error(f"Ошибка парсинга Музеев (ТГЛИАМЗ): {e}")
+
     return events
 
 
-# ===================== ЗАПУСК БОТА =====================
+async def fetch_events(session: aiohttp.ClientSession) -> List[Event]:
+    all_events = []
+    chehov_events = await parse_chehov_theatre(session)
+    all_events.extend(chehov_events)
+
+    museum_events = await parse_tgliamz_museums(session)
+    all_events.extend(museum_events)
+
+    return all_events
+
+
+# ===================== ОСНОВНОЙ ЦИКЛ ОТПРАВКИ =====================
 async def main():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
     channel_id = os.getenv("TELEGRAM_CHANNEL_ID") or os.getenv("CHAT_ID")
 
     if not bot_token or not channel_id:
-        logger.error("ОШИБКА: Токены не найдены!")
+        logger.error("ОШИБКА: Переменные BOT_TOKEN или CHAT_ID не найдены!")
         return
 
     bot = Bot(token=bot_token)
     db = Database()
-    db.clear_all()  # Сброс базы для чистой проверки отправки!
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "ru-RU,ru;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     async with aiohttp.ClientSession(headers=headers) as session:
-        logger.info("Запуск профессионального парсинга...")
-        
-        museum_events = await parse_tgliamz_museums(session)
-        theatre_events = await parse_chekhov_theatre(session)
-        
-        events = museum_events + theatre_events
-        logger.info(f"Найдено уникальных мероприятий: {len(events)}")
+        logger.info("Запуск Парсинга...")
+        events = await fetch_events(session)
+        logger.info(f"Всего найдено мероприятий: {len(events)}")
 
         for event in events:
             if db.is_sent(event.event_id):
+                logger.info(f"Событие [{event.title}] уже было отправлено, пропускаем.")
                 continue
 
             caption = format_caption(event)
             photo_sent = False
 
+            # Пробуем скачать картинку напрямую в память и отправить её
             if event.image_url:
                 try:
-                    async with session.get(event.image_url, timeout=12) as resp:
-                        if resp.status == 200:
-                            img_bytes = await resp.read()
-                            if len(img_bytes) > 3000:
-                                img_file = io.BytesIO(img_bytes)
-                                img_file.name = "poster.jpg"
+                    async with session.get(event.image_url, timeout=10) as img_resp:
+                        if img_resp.status == 200:
+                            img_data = await img_resp.read()
+                            img_file = io.BytesIO(img_data)
+                            img_file.name = "image.jpg"
 
-                                await bot.send_photo(
-                                    chat_id=channel_id,
-                                    photo=img_file,
-                                    caption=caption,
-                                    parse_mode=ParseMode.HTML
-                                )
-                                photo_sent = True
-                                logger.info(f"Успешно отправлено с фото: {event.title}")
-                except Exception as e:
-                    logger.warning(f"Ошибка отправки фото [{event.image_url}]: {e}")
+                            await bot.send_photo(
+                                chat_id=channel_id,
+                                photo=img_file,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML
+                            )
+                            photo_sent = True
+                except Exception as img_err:
+                    logger.warning(f"Не удалось загрузить фото для [{event.title}], отправляем текстом: {img_err}")
 
+            # Если фото не отправлено (нет картинки или ошибка загрузки), отправляем строгим текстом
             if not photo_sent:
                 try:
                     await bot.send_message(
@@ -412,14 +318,17 @@ async def main():
                         parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True
                     )
-                    logger.info(f"Успешно отправлено без фото: {event.title}")
                 except TelegramError as e:
-                    logger.error(f"Ошибка отправки текста: {e}")
+                    logger.error(f"Ошибка отправки текста для [{event.title}]: {e}")
+                    continue
 
             db.mark_as_sent(event.event_id)
-            await asyncio.sleep(3)
+            logger.info(f"Успешно отправлено в Telegram: {event.title}")
 
-    logger.info("Парсинг успешно завершен.")
+            # Пауза 2 секунды между постами
+            await asyncio.sleep(2)
+
+    logger.info("Запуск завершен.")
 
 
 if __name__ == "__main__":
