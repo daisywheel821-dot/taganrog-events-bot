@@ -154,20 +154,18 @@ def extract_all_phones(text: str) -> List[tuple]:
         if not digits:
             continue
 
-        # Городской номер Таганрога (6 цифр)
         if len(digits) == 6 and digits not in seen_digits:
             seen_digits.add(digits)
             display = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
             tel = f"+78634{digits}"
             formatted_phones.append((display, tel))
-        # Полный номер (11 цифр)
         elif len(digits) == 11 and digits not in seen_digits:
             seen_digits.add(digits)
-            if digits[1] == '9':  # Мобильный
+            if digits[1] == '9':
                 display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
-            elif digits[1:5] == '8634':  # Городской Таганрога с кодом
+            elif digits[1:5] == '8634':
                 display = f"8 (8634) {digits[5:7]}-{digits[7:9]}-{digits[9:]}"
-            else:  # Любой другой
+            else:
                 display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
             
             tel = f"+7{digits[1:]}"
@@ -230,11 +228,9 @@ def format_caption(event: Event) -> str:
     if time_str:
         lines.append(f"<b>Время:</b> {time_str}")
 
-    if location and address:
-        lines.append(f"<b>Место:</b> {location} ({address})")
-    elif location:
+    if location:
         lines.append(f"<b>Место:</b> {location}")
-    elif address:
+    if address:
         lines.append(f"<b>Адрес:</b> {address}")
 
     if prices:
