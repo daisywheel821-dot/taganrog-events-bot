@@ -46,7 +46,7 @@ class Event:
     address: str = ""
     description: str = ""
     prices: str = ""
-    phone: str = ""
+    phones: List[tuple] = None  # Список кортежей [(display_phone, tel_link)]
     tickets_url: str = ""
     image_url: Optional[str] = None
 
@@ -88,32 +88,36 @@ def is_souvenir_shop_item(text: str) -> bool:
     return any(word in check_str for word in STRICT_SOUVENIR_WORDS)
 
 
-def format_phone_number(raw_phone: str) -> tuple[str, str]:
-    """
-    Возвращает пару: (красивое отображение, чистый номер для tel:)
-    Пример: '+7 (8634) 38-34-96', '+78634383496'
-    """
-    digits = re.sub(r"[^\d]", "", raw_phone)
-    if not digits:
-        return raw_phone, raw_phone
+def extract_all_phones(text: str) -> List[tuple]:
+    """Извлекает ВСЕ телефоны для записи (городские и сотовые)"""
+    phone_pattern = r"(?:\+?7|8)[\s\(\-]*\d{3,4}[\s\)\-]*\d{2,3}[\s\-]*\d{2}[\s\-]*\d{2}|\b\d{2}-\d{2}-\d{2}\b"
+    raw_phones = re.findall(phone_pattern, text)
 
-    if len(digits) == 11:
-        # Корректируем код страны
-        country_code = "+7" if digits.startswith("7") or digits.startswith("8") else f"+{digits[0]}"
-        area = digits[1:5]
-        p1 = digits[5:7]
-        p2 = digits[7:9]
-        p3 = digits[9:11]
-        
-        display_phone = f"{country_code} ({area}) {p1}-{p2}-{p3}"
-        tel_phone = f"+7{digits[1:]}"
-        return display_phone, tel_phone
-    elif len(digits) == 6:  # Городской 6-значный номер Таганрога
-        display_phone = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
-        tel_phone = f"+78634{digits}"
-        return display_phone, tel_phone
+    formatted_phones = []
+    seen_digits = set()
 
-    return raw_phone, f"+{digits}"
+    for raw in raw_phones:
+        digits = re.sub(r"\D", "", raw)
+        if not digits:
+            continue
+
+        if len(digits) == 6 and digits not in seen_digits:
+            seen_digits.add(digits)
+            display = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
+            tel = f"+78634{digits}"
+            formatted_phones.append((display, tel))
+        elif len(digits) == 11 and digits not in seen_digits:
+            seen_digits.add(digits)
+            if digits[1] == '9':
+                display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
+            elif digits[1:5] == '8634':
+                display = f"8 (8634) {digits[5:7]}-{digits[7:9]}-{digits[9:]}"
+            else:
+                display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
+            tel = f"+7{digits[1:]}"
+            formatted_phones.append((display, tel))
+
+    return formatted_phones
 
 
 # ===================== ФОРМАТИРОВАНИЕ СООБЩЕНИЙ =====================
@@ -162,10 +166,10 @@ def format_caption(event: Event) -> str:
     links = []
     if tickets_url:
         links.append(f"<a href='{tickets_url}'>Официальная страница / Билеты</a>")
-    
-    if event.phone:
-        display_phone, tel_phone = format_phone_number(event.phone)
-        links.append(f"<b>Справки по телефону:</b> <a href='tel:{tel_phone}'>{display_phone}</a>")
+
+    if event.phones:
+        phone_links = [f"<a href='tel:{tel}'>{disp}</a>" for disp, tel in event.phones]
+        links.append("<b>Запись и справки по телефонам:</b> " + ", ".join(phone_links))
 
     if links:
         lines.append("\n" + "\n".join(links))
@@ -225,7 +229,7 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
                                 location="Театр им. А.П. Чехова",
                                 address="ул. Петровская, 90",
                                 prices=prices,
-                                phone="+7 (8634) 38-29-68",
+                                phones=extract_all_phones("+7 (8634) 38-29-68"),
                                 tickets_url=tickets_url,
                                 image_url=image_url
                             )
@@ -237,8 +241,17 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
 
 
 async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) -> dict:
-    """Извлечение подробного описания, даты и телефона со страницы события ТГЛИАМЗ"""
-    data = {"description": "", "date_str": "", "time_str": "", "phone": "+7 (8634) 38-34-96", "is_shop": False}
+    """Полное извлечение описания, даты, времени, места и ВСЕХ телефонов записи"""
+    data = {
+        "description": "", 
+        "date_str": "", 
+        "time_str": "", 
+        "location": "", 
+        "address": "", 
+        "prices": "", 
+        "phones": [], 
+        "is_shop": False
+    }
     try:
         async with session.get(detail_url, timeout=10) as resp:
             if resp.status == 200:
@@ -248,35 +261,50 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                     return data
 
                 soup = BeautifulSoup(html_text, "html.parser")
-                
-                # Улучшенный сбор текста для Bitrix страниц ТГЛИАМЗ
-                content_block = soup.select_one(".detail-text, .news-detail, .content-text, .detail_text, .workarea")
+
+                # Извлечение текста
+                content_block = soup.select_one(".detail-text, .news-detail, .content-text, .detail_text, .workarea, .content")
                 if content_block:
-                    # Удаляем ненужные теги скриптов и стилей
                     for s in content_block(["script", "style"]):
                         s.extract()
-                    
+
                     paragraphs = []
                     for el in content_block.find_all(["p", "div"]):
                         txt = el.get_text(strip=True)
-                        # Фильтруем служебный текст и короткие строки
-                        if len(txt) > 30 and not txt.startswith("Тел") and not txt.startswith("Купить"):
+                        if len(txt) > 20 and not txt.startswith("Купить") and not txt.startswith("Тел"):
                             if txt not in paragraphs:
                                 paragraphs.append(txt)
-                    
-                    if paragraphs:
-                        # Берем первые 2 смысловых абзаца
-                        data["description"] = "\n\n".join(paragraphs[:2])
 
-                # Извлечение даты
-                date_match = re.search(r"(\d{1,2}(?:\s*-\s*\d{1,2})?\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))", html_text, re.I)
+                    if paragraphs:
+                        data["description"] = "\n\n".join(paragraphs[:3])
+
+                # Парсинг даты и времени
+                date_match = re.search(r"((?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье)?,?\s*\d{1,2}(?:\s*-\s*\d{1,2})?\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))", html_text, re.I)
                 if date_match:
                     data["date_str"] = date_match.group(1)
 
-                # Точный поиск телефона музея на странице
-                phone_match = re.search(r"(\+?7|8)[\s\(\-]*\(?8634\)?[\s\(\-]*\d{2,3}[\s\-]*\d{2}[\s\-]*\d{2}", html_text)
-                if phone_match:
-                    data["phone"] = phone_match.group(0)
+                time_match = re.search(r"\bв\s*(\d{1,2}[\.\:]\d{2})\b", html_text, re.I)
+                if time_match:
+                    data["time_str"] = time_match.group(1)
+
+                # Поиск локации и адреса в тексте
+                if "ЮРНКЦ" in html_text or "Южно-Российский" in html_text:
+                    data["location"] = "ЮРНКЦ А.П. Чехова"
+                    data["address"] = "ул. Октябрьская, 9"
+                elif "Дворец Алфераки" in html_text or "Краеведческий" in html_text:
+                    data["location"] = "Историко-краеведческий музей (Дворец Алфераки)"
+                    data["address"] = "ул. Фрунзе, 41"
+                elif "Домик Чехова" in html_text:
+                    data["location"] = "Музей «Домик Чехова»"
+                    data["address"] = "ул. Чехова, 69"
+
+                # Извлечение цены
+                price_match = re.search(r"Стоимость[^\d]*?(\d+\s*руб[а-я]*)", html_text, re.I)
+                if price_match:
+                    data["prices"] = price_match.group(1)
+
+                # Вытаскиваем ВСЕ телефоны для записи
+                data["phones"] = extract_all_phones(html_text)
 
     except Exception as e:
         logger.warning(f"Ошибка получения деталей страницы {detail_url}: {e}")
@@ -314,7 +342,7 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                         if link_el and link_el.get("href"):
                             tickets_url = urljoin(base_url, link_el["href"])
 
-                        # Подтягиваем детали страницы
+                        # Подтягиваем полную информацию со страницы события
                         detail_data = await parse_tgliamz_detail(session, tickets_url)
                         if detail_data["is_shop"]:
                             continue
@@ -332,9 +360,12 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                                 category=Category.MUSEUM,
                                 title=title,
                                 date_str=date_str or detail_data["date_str"],
-                                location=location,
+                                time_str=detail_data["time_str"],
+                                location=detail_data["location"] or location,
+                                address=detail_data["address"],
                                 description=detail_data["description"],
-                                phone=detail_data["phone"],
+                                prices=detail_data["prices"],
+                                phones=detail_data["phones"],
                                 tickets_url=tickets_url,
                                 image_url=image_url
                             )
@@ -385,7 +416,6 @@ async def main():
             caption = format_caption(event)
             photo_sent = False
 
-            # Пробуем скачать картинку напрямую в память и отправить её
             if event.image_url:
                 try:
                     async with session.get(event.image_url, timeout=10) as img_resp:
@@ -404,7 +434,6 @@ async def main():
                 except Exception as img_err:
                     logger.warning(f"Не удалось загрузить фото для [{event.title}], отправляем текстом: {img_err}")
 
-            # Если фото не отправлено (нет картинки или ошибка загрузки), отправляем текстом
             if not photo_sent:
                 try:
                     await bot.send_message(
@@ -420,7 +449,6 @@ async def main():
             db.mark_as_sent(event.event_id)
             logger.info(f"Успешно отправлено в Telegram: {event.title}")
 
-            # Пауза 2 секунды между постами
             await asyncio.sleep(2)
 
     logger.info("Запуск завершен.")
