@@ -5,7 +5,7 @@ import sqlite3
 import html
 import io
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 from urllib.parse import urljoin
@@ -28,6 +28,58 @@ STRICT_SOUVENIR_WORDS = [
     "музейный магазин", "прейскурант цен на товары", "каталог сувениров"
 ]
 
+# Справочник филиалов ТГЛИАМЗ
+MUSEUM_BRANCHES = [
+    {
+        "keys": ["литературный музей", "литературно-музыкальн"],
+        "name": "Литературный музей А.П. Чехова",
+        "address": "ул. Октябрьская, 9",
+        "tag": "#ЛитературныйМузейЧехова"
+    },
+    {
+        "keys": ["юрнкц", "южно-российский"],
+        "name": "ЮРНКЦ А.П. Чехова",
+        "address": "ул. Октябрьская, 9",
+        "tag": "#ЮРНКЦЧехова"
+    },
+    {
+        "keys": ["дворец алфераки", "историко-краеведческий"],
+        "name": "Историко-краеведческий музей (Дворец Алфераки)",
+        "address": "ул. Фрунзе, 41",
+        "tag": "#ДворецАлфераки"
+    },
+    {
+        "keys": ["домик чехова"],
+        "name": "Музей «Домик Чехова»",
+        "address": "ул. Чехова, 69",
+        "tag": "#ДомикЧехова"
+    },
+    {
+        "keys": ["лавка чеховых", "лавка чехова"],
+        "name": "Музей «Лавка Чеховых»",
+        "address": "ул. Александровская, 100",
+        "tag": "#ЛавкаЧеховых"
+    },
+    {
+        "keys": ["градостроительства"],
+        "name": "Музей градостроительства и быта",
+        "address": "ул. Фрунзе, 80",
+        "tag": "#МузейГрадостроительства"
+    },
+    {
+        "keys": ["дурова"],
+        "name": "Музей А.А. Дурова",
+        "address": "ул. A. Глушко, 44",
+        "tag": "#МузейДурова"
+    },
+    {
+        "keys": ["василенко"],
+        "name": "Музей И.Д. Василенко",
+        "address": "ул. Чехова, 88",
+        "tag": "#МузейВасиленко"
+    }
+]
+
 
 # ===================== МОДЕЛИ ДАННЫХ =====================
 class Category(Enum):
@@ -46,9 +98,10 @@ class Event:
     address: str = ""
     description: str = ""
     prices: str = ""
-    phones: List[tuple] = None  # Список кортежей [(display_phone, tel_link)]
+    phones: List[tuple] = field(default_factory=list)  # [(display_phone, tel_link)]
     tickets_url: str = ""
     image_url: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
 
 
 # ===================== РАБОТА С БАЗОЙ ДАННЫХ =====================
@@ -89,7 +142,7 @@ def is_souvenir_shop_item(text: str) -> bool:
 
 
 def extract_all_phones(text: str) -> List[tuple]:
-    """Извлекает ВСЕ телефоны для записи (городские и сотовые)"""
+    """Извлекает и форматирует ВСЕ телефоны в красивый читаемый формат"""
     phone_pattern = r"(?:\+?7|8)[\s\(\-]*\d{3,4}[\s\)\-]*\d{2,3}[\s\-]*\d{2}[\s\-]*\d{2}|\b\d{2}-\d{2}-\d{2}\b"
     raw_phones = re.findall(phone_pattern, text)
 
@@ -101,23 +154,53 @@ def extract_all_phones(text: str) -> List[tuple]:
         if not digits:
             continue
 
+        # Городской номер Таганрога (6 цифр)
         if len(digits) == 6 and digits not in seen_digits:
             seen_digits.add(digits)
             display = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
             tel = f"+78634{digits}"
             formatted_phones.append((display, tel))
+        # Полный номер (11 цифр)
         elif len(digits) == 11 and digits not in seen_digits:
             seen_digits.add(digits)
-            if digits[1] == '9':
+            if digits[1] == '9':  # Мобильный
                 display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
-            elif digits[1:5] == '8634':
+            elif digits[1:5] == '8634':  # Городской Таганрога с кодом
                 display = f"8 (8634) {digits[5:7]}-{digits[7:9]}-{digits[9:]}"
-            else:
+            else:  # Любой другой
                 display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
+            
             tel = f"+7{digits[1:]}"
             formatted_phones.append((display, tel))
 
     return formatted_phones
+
+
+def generate_museum_tags(text: str, branch_tag: str) -> List[str]:
+    """Генерация уникальных тегов"""
+    tags = ["#ТГЛИАМЗ"]
+    if branch_tag:
+        tags.append(branch_tag)
+
+    text_lower = text.lower()
+    if "джаз" in text_lower or "концерт" in text_lower or "музык" in text_lower:
+        tags.append("#музыкавмузее")
+        tags.append("#концерт")
+    if "мастер-класс" in text_lower or "мастер класс" in text_lower:
+        tags.append("#мастеркласс")
+        tags.append("#творчество")
+    if "выставк" in text_lower or "экспозиц" in text_lower:
+        tags.append("#выставка")
+    if "программ" in text_lower or "экскурси" in text_lower:
+        tags.append("#программы")
+
+    tags.extend(["#Таганрог", "#афиша"])
+    
+    unique_tags = []
+    for t in tags:
+        if t not in unique_tags:
+            unique_tags.append(t)
+    return unique_tags
 
 
 # ===================== ФОРМАТИРОВАНИЕ СООБЩЕНИЙ =====================
@@ -142,13 +225,10 @@ def format_caption(event: Event) -> str:
 
     lines.append(f"<b>{title}</b>\n")
 
-    date_parts = []
     if date_str:
-        date_parts.append(f"<b>Дата:</b> {date_str}")
+        lines.append(f"<b>Дата:</b> {date_str}")
     if time_str:
-        date_parts.append(f"<b>Время:</b> {time_str}")
-    if date_parts:
-        lines.append(" | ".join(date_parts))
+        lines.append(f"<b>Время:</b> {time_str}")
 
     if location and address:
         lines.append(f"<b>Место:</b> {location} ({address})")
@@ -163,21 +243,20 @@ def format_caption(event: Event) -> str:
     if description:
         lines.append(f"\n{description}")
 
-    links = []
+    # Блок ссылок и телефонов
     if tickets_url:
-        links.append(f"<a href='{tickets_url}'>Официальная страница / Билеты</a>")
+        lines.append(f"\n<a href='{tickets_url}'>Официальная страница / Билеты</a>")
 
     if event.phones:
-        phone_links = [f"<a href='tel:{tel}'>{disp}</a>" for disp, tel in event.phones]
-        links.append("<b>Запись и справки по телефонам:</b> " + ", ".join(phone_links))
+        lines.append("\n<b>Телефоны для справок и бронирования:</b>")
+        for disp, tel in event.phones:
+            lines.append(f"📞 <a href='tel:{tel}'>{disp}</a>")
 
-    if links:
-        lines.append("\n" + "\n".join(links))
-
-    if event.category == Category.THEATRE_MONTH:
-        lines.append("\n#Таганрог #ТеатрЧехова #Афиша")
+    # Вывод динамических тегов
+    if event.tags:
+        lines.append("\n" + " ".join(event.tags))
     else:
-        lines.append("\n#Таганрог #Музей #Выставка")
+        lines.append("\n#Таганрог #Афиша")
 
     return "\n".join(lines)
 
@@ -231,7 +310,8 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
                                 prices=prices,
                                 phones=extract_all_phones("+7 (8634) 38-29-68"),
                                 tickets_url=tickets_url,
-                                image_url=image_url
+                                image_url=image_url,
+                                tags=["#Таганрог", "#ТеатрЧехова", "#Афиша"]
                             )
                         )
     except Exception as e:
@@ -241,7 +321,6 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
 
 
 async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) -> dict:
-    """Полное извлечение описания, даты, времени, места и ВСЕХ телефонов записи"""
     data = {
         "description": "", 
         "date_str": "", 
@@ -250,6 +329,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
         "address": "", 
         "prices": "", 
         "phones": [], 
+        "branch_tag": "",
         "is_shop": False
     }
     try:
@@ -262,8 +342,8 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                 soup = BeautifulSoup(html_text, "html.parser")
 
-                # Извлечение текста
                 content_block = soup.select_one(".detail-text, .news-detail, .content-text, .detail_text, .workarea, .content")
+                full_text = ""
                 if content_block:
                     for s in content_block(["script", "style"]):
                         s.extract()
@@ -277,34 +357,32 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                     if paragraphs:
                         data["description"] = "\n\n".join(paragraphs[:3])
+                        full_text = " ".join(paragraphs)
+                
+                if not full_text:
+                    full_text = soup.get_text()
 
-                # Парсинг даты и времени
-                date_match = re.search(r"((?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье)?,?\s*\d{1,2}(?:\s*-\s*\d{1,2})?\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))", html_text, re.I)
+                text_to_check = full_text.lower()
+                for branch in MUSEUM_BRANCHES:
+                    if any(k in text_to_check for k in branch["keys"]):
+                        data["location"] = branch["name"]
+                        data["address"] = branch["address"]
+                        data["branch_tag"] = branch["tag"]
+                        break
+
+                date_match = re.search(r"((?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье)?,?\s*\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))", full_text, re.I)
                 if date_match:
-                    data["date_str"] = date_match.group(1)
+                    data["date_str"] = date_match.group(1).capitalize()
 
-                time_match = re.search(r"\bв\s*(\d{1,2}[\.\:]\d{2})\b", html_text, re.I)
+                time_match = re.search(r"\bв\s*(\d{1,2}[\.\:]\d{2})\b", full_text, re.I)
                 if time_match:
-                    data["time_str"] = time_match.group(1)
+                    data["time_str"] = time_match.group(1).replace(".", ":")
 
-                # Поиск локации и адреса в тексте
-                if "ЮРНКЦ" in html_text or "Южно-Российский" in html_text:
-                    data["location"] = "ЮРНКЦ А.П. Чехова"
-                    data["address"] = "ул. Октябрьская, 9"
-                elif "Дворец Алфераки" in html_text or "Краеведческий" in html_text:
-                    data["location"] = "Историко-краеведческий музей (Дворец Алфераки)"
-                    data["address"] = "ул. Фрунзе, 41"
-                elif "Домик Чехова" in html_text:
-                    data["location"] = "Музей «Домик Чехова»"
-                    data["address"] = "ул. Чехова, 69"
-
-                # Извлечение цены
-                price_match = re.search(r"Стоимость[^\d]*?(\d+\s*руб[а-я]*)", html_text, re.I)
+                price_match = re.search(r"(?:стоимость[^\d]*?|билет[а-я]*\s*–?\s*)(\d+\s*руб[а-я]*)", full_text, re.I)
                 if price_match:
                     data["prices"] = price_match.group(1)
 
-                # Вытаскиваем ВСЕ телефоны для записи
-                data["phones"] = extract_all_phones(html_text)
+                data["phones"] = extract_all_phones(full_text)
 
     except Exception as e:
         logger.warning(f"Ошибка получения деталей страницы {detail_url}: {e}")
@@ -336,13 +414,12 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                             continue
 
                         date_str = date_el.get_text(strip=True) if date_el else ""
-                        location = loc_el.get_text(strip=True) if loc_el else "Таганрогский музей-заповедник"
+                        location_card = loc_el.get_text(strip=True) if loc_el else "Таганрогский музей-заповедник"
 
                         tickets_url = url
                         if link_el and link_el.get("href"):
                             tickets_url = urljoin(base_url, link_el["href"])
 
-                        # Подтягиваем полную информацию со страницы события
                         detail_data = await parse_tgliamz_detail(session, tickets_url)
                         if detail_data["is_shop"]:
                             continue
@@ -352,6 +429,12 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                             src = img_el["src"]
                             image_url = urljoin(base_url, src)
 
+                        final_location = detail_data["location"] or location_card
+                        final_tags = generate_museum_tags(
+                            title + " " + detail_data["description"], 
+                            detail_data["branch_tag"]
+                        )
+
                         event_id = f"tgliamz_{hash(title + (date_str or detail_data['date_str']) + tickets_url)}"
 
                         events.append(
@@ -359,15 +442,16 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                                 event_id=event_id,
                                 category=Category.MUSEUM,
                                 title=title,
-                                date_str=date_str or detail_data["date_str"],
+                                date_str=detail_data["date_str"] or date_str,
                                 time_str=detail_data["time_str"],
-                                location=detail_data["location"] or location,
+                                location=final_location,
                                 address=detail_data["address"],
                                 description=detail_data["description"],
                                 prices=detail_data["prices"],
                                 phones=detail_data["phones"],
                                 tickets_url=tickets_url,
-                                image_url=image_url
+                                image_url=image_url,
+                                tags=final_tags
                             )
                         )
     except Exception as e:
