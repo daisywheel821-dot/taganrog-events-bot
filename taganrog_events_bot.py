@@ -38,7 +38,7 @@ MUSEUM_BRANCHES = [
         "tag": "#ЛитературныйМузейЧехова"
     },
     {
-        "keys": ["юрНКц", "южно-российский"],
+        "keys": ["юрнкц", "южно-российский"],
         "name": "ЮРНКЦ А.П. Чехова",
         "address": "ул. Октябрьская, 9",
         "tag": "#ЮРНКЦЧехова"
@@ -158,11 +158,14 @@ def extract_all_phones(text: str) -> List[tuple]:
         if any(ex in digits for ex in EXCLUDED_PHONES):
             continue
 
+        # Городские 6-значные номера Таганрога (8634)
         if len(digits) == 6 and digits not in seen_digits:
             seen_digits.add(digits)
             display = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
             tel = f"+78634{digits}"
             formatted_phones.append((display, tel))
+            
+        # 11-значные номера (мобильные и городские)
         elif len(digits) == 11 and digits not in seen_digits:
             seen_digits.add(digits)
             if digits[1] == '9':
@@ -188,7 +191,7 @@ def generate_museum_tags(text: str, branch_tag: str) -> List[str]:
     if "джаз" in text_lower or "концерт" in text_lower or "музык" in text_lower:
         tags.append("#музыкавмузее")
         tags.append("#концерт")
-    if "мастер-класс" in text_lower or "мастер класс" in text_lower:
+    if "мастер-класс" in text_lower or "мастер класс" in text_lower or "занятие" in text_lower:
         tags.append("#мастеркласс")
         tags.append("#творчество")
     if "выставк" in text_lower or "экспозиц" in text_lower:
@@ -221,7 +224,6 @@ def format_caption(event: Event) -> str:
         lines.append("<b>ТАГАНРОГСКИЙ ТЕАТР ИМ. А.П. ЧЕХОВА</b>")
         lines.append("<i>Репертуар и анонс спектаклей</i>\n")
     elif event.category == Category.MUSEUM:
-        # Вернули более естественный заголовок блока
         lines.append("<b>МУЗЕЙНАЯ АФИША ТАГАНРОГА</b>")
         lines.append("<i>Таганрогский музей-заповедник</i>\n")
 
@@ -339,6 +341,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                 soup = BeautifulSoup(html_text, "html.parser")
 
+                # Поиск ссылки на ВМузей, если она есть
                 for a_tag in soup.find_all("a", href=True):
                     href = a_tag["href"].strip()
                     link_text = a_tag.get_text(strip=True).lower()
@@ -352,7 +355,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                         if not data["buy_ticket_url"]:
                             data["buy_ticket_url"] = href
 
-                content_block = soup.select_one(".detail-text, .news-detail, .content-text, .detail_text, .workarea, .content")
+                content_block = soup.select_one(".detail-text, .news-detail, .content-text, .detail_text, .workarea, .content, article")
                 page_full_text = soup.get_text()
                 data["phones"] = extract_all_phones(page_full_text)
 
@@ -368,7 +371,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                         if len(txt) < 15 or txt.lower().startswith("купить билет"):
                             continue
 
-                        if any(phrase in txt.lower() for phrase in ["предварительная запись", "количество мест ограничено", "приглашаются участники", "опыт не важен"]):
+                        if any(phrase in txt.lower() for phrase in ["предварительная запись", "количество мест ограничено", "приглашаются участники", "опыт не важен", "справки по телефону"]):
                             if txt not in important_notes:
                                 important_notes.append(html.escape(txt))
                         else:
@@ -377,7 +380,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                     desc_parts = []
                     if paragraphs:
-                        desc_parts.append("\n\n".join(paragraphs[:2]))
+                        desc_parts.append("\n\n".join(paragraphs[:3]))
                     if important_notes:
                         desc_parts.append("📌 <b>Важно:</b>\n" + "\n".join([f"• {note}" for note in important_notes]))
 
@@ -419,76 +422,72 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                 html_content = await response.text()
                 soup = BeautifulSoup(html_content, "html.parser")
 
-                # Расширенный селектор для гарантированного отлова всех блоков мероприятий и мастер-классов
-                items = soup.select(".news-item, .event-card, .calendar-item, .item, .col-md-4, .col-sm-6, .col-xs-12, a.news-item-link")
-                
-                for item in items:
-                    title_el = item.select_one(".title, .name, h2, h3, h4, .news-title")
+                # Ищем все ссылки на события с календаря и афиши
+                links = soup.find_all("a", href=True)
+                candidate_urls = set()
+
+                for a in links:
+                    href = a["href"].strip()
+                    # Собираем ссылки на новости/календарь/анонсы
+                    if any(part in href for part in ["/calendar/", "/news/", "/afisha/"]) and href != "/calendar/":
+                        full_url = urljoin(base_url, href)
+                        candidate_urls.add(full_url)
+
+                logger.info(f"Найдено ссылок на события ТГЛИАМЗ: {len(candidate_urls)}")
+
+                for event_url in candidate_urls:
+                    detail_data = await parse_tgliamz_detail(session, event_url)
                     
-                    # Если название не нашлось в привычном теге, пробуем взять текст самого элемента или ссылки
-                    if not title_el and item.name == 'a':
-                        title = item.get_text(strip=True)
-                    elif title_el:
-                        title = title_el.get_text(strip=True)
-                    else:
-                        continue
-
-                    if len(title) < 3 or "подробнее" in title.lower():
-                        continue
-
-                    date_el = item.select_one(".date, .time, .calendar-date")
-                    loc_el = item.select_one(".location, .place, .museum-title")
-                    img_el = item.select_one("img")
-                    
-                    link_el = item if item.name == 'a' else item.select_one("a[href]")
-
-                    date_str = date_el.get_text(strip=True) if date_el else ""
-                    location_card = loc_el.get_text(strip=True) if loc_el else "Таганрогский музей-заповедник"
-
-                    tickets_url = url
-                    if link_el and link_el.get("href"):
-                        tickets_url = urljoin(base_url, link_el["href"])
-
-                    # Уникальный ID завязан СТРОГО на URL страницы (чтобы мастер-классы с одинаковыми датами не терялись)
-                    event_id = f"tgliamz_{hash(tickets_url)}"
-
-                    detail_data = await parse_tgliamz_detail(session, tickets_url)
                     if detail_data["is_shop"]:
                         continue
 
-                    image_url = None
-                    if img_el and img_el.get("src"):
-                        src = img_el["src"]
-                        image_url = urljoin(base_url, src)
+                    # Получаем заголовок напрямую со страницы события
+                    async with session.get(event_url, timeout=10) as page_resp:
+                        if page_resp.status == 200:
+                            page_html = await page_resp.text()
+                            p_soup = BeautifulSoup(page_html, "html.parser")
+                            
+                            h1 = p_soup.select_one("h1, .page-header, .news-detail-title")
+                            title = h1.get_text(strip=True) if h1 else ""
 
-                    final_location = detail_data["location"] or location_card
-                    final_tags = generate_museum_tags(
-                        title + " " + detail_data["description"], 
-                        detail_data["branch_tag"]
-                    )
+                            if not title or len(title) < 3:
+                                continue
 
-                    events.append(
-                        Event(
-                            event_id=event_id,
-                            category=Category.MUSEUM,
-                            title=title,
-                            date_str=detail_data["date_str"] or date_str,
-                            time_str=detail_data["time_str"],
-                            location=final_location,
-                            address=detail_data["address"],
-                            description=detail_data["description"],
-                            prices=detail_data["prices"],
-                            phones=detail_data["phones"],
-                            tickets_url=tickets_url,
-                            buy_ticket_url=detail_data["buy_ticket_url"],
-                            image_url=image_url,
-                            tags=final_tags
-                        )
-                    )
+                            # Ищем картинку на странице
+                            img_el = p_soup.select_one(".detail-picture, .news-detail img, .content img, article img")
+                            image_url = None
+                            if img_el and img_el.get("src"):
+                                image_url = urljoin(base_url, img_el["src"])
+
+                            event_id = f"tgliamz_{hash(event_url)}"
+
+                            final_location = detail_data["location"] or "Таганрогский музей-заповедник"
+                            final_tags = generate_museum_tags(
+                                title + " " + detail_data["description"], 
+                                detail_data["branch_tag"]
+                            )
+
+                            events.append(
+                                Event(
+                                    event_id=event_id,
+                                    category=Category.MUSEUM,
+                                    title=title,
+                                    date_str=detail_data["date_str"],
+                                    time_str=detail_data["time_str"],
+                                    location=final_location,
+                                    address=detail_data["address"],
+                                    description=detail_data["description"],
+                                    prices=detail_data["prices"],
+                                    phones=detail_data["phones"],
+                                    tickets_url=event_url,
+                                    buy_ticket_url=detail_data["buy_ticket_url"],
+                                    image_url=image_url,
+                                    tags=final_tags
+                                )
+                            )
     except Exception as e:
         logger.error(f"Ошибка парсинга Музеев (ТГЛИАМЗ): {e}")
 
-    # Фильтрация дубликатов в рамках одного запуска
     unique_events = {}
     for ev in events:
         if ev.event_id not in unique_events:
@@ -529,9 +528,13 @@ async def main():
         events = await fetch_events(session)
         logger.info(f"Всего найдено мероприятий: {len(events)}")
 
+        sent_count = 0
+        skipped_count = 0
+
         for event in events:
             if db.is_sent(event.event_id):
-                logger.info(f"Событие [{event.title}] уже было отправлено, пропускаем.")
+                logger.info(f"Пропущено (уже в БД): [{event.title}]")
+                skipped_count += 1
                 continue
 
             caption = format_caption(event)
@@ -575,11 +578,12 @@ async def main():
                     continue
 
             db.mark_as_sent(event.event_id)
-            logger.info(f"Успешно отправлено в Telegram: {event.title}")
+            sent_count += 1
+            logger.info(f"Успешно отправлено ({sent_count}/{len(events)}): {event.title}")
 
             await asyncio.sleep(2)
 
-    logger.info("Запуск завершен.")
+    logger.info(f"Запуск завершен. Отправлено: {sent_count}, пропущено повторов: {skipped_count}.")
 
 
 if __name__ == "__main__":
