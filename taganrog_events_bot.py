@@ -23,7 +23,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Строгие ключевые слова для отсечения товаров магазина (без блокировки мастер-классов)
 STRICT_SOUVENIR_WORDS = [
     "сувенирная продукция", "купить сувенир", "в продаже сувениры",
     "музейный магазин", "прейскурант цен на товары", "каталог сувениров"
@@ -89,6 +88,34 @@ def is_souvenir_shop_item(text: str) -> bool:
     return any(word in check_str for word in STRICT_SOUVENIR_WORDS)
 
 
+def format_phone_number(raw_phone: str) -> tuple[str, str]:
+    """
+    Возвращает пару: (красивое отображение, чистый номер для tel:)
+    Пример: '+7 (8634) 38-34-96', '+78634383496'
+    """
+    digits = re.sub(r"[^\d]", "", raw_phone)
+    if not digits:
+        return raw_phone, raw_phone
+
+    if len(digits) == 11:
+        # Корректируем код страны
+        country_code = "+7" if digits.startswith("7") or digits.startswith("8") else f"+{digits[0]}"
+        area = digits[1:5]
+        p1 = digits[5:7]
+        p2 = digits[7:9]
+        p3 = digits[9:11]
+        
+        display_phone = f"{country_code} ({area}) {p1}-{p2}-{p3}"
+        tel_phone = f"+7{digits[1:]}"
+        return display_phone, tel_phone
+    elif len(digits) == 6:  # Городской 6-значный номер Таганрога
+        display_phone = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
+        tel_phone = f"+78634{digits}"
+        return display_phone, tel_phone
+
+    return raw_phone, f"+{digits}"
+
+
 # ===================== ФОРМАТИРОВАНИЕ СООБЩЕНИЙ =====================
 def format_caption(event: Event) -> str:
     title = html.escape(event.title.strip())
@@ -98,7 +125,6 @@ def format_caption(event: Event) -> str:
     address = html.escape(event.address.strip())
     description = html.escape(event.description.strip())
     prices = html.escape(event.prices.strip())
-    phone = html.escape(event.phone.strip())
     tickets_url = html.escape(event.tickets_url.strip())
 
     lines = []
@@ -136,9 +162,10 @@ def format_caption(event: Event) -> str:
     links = []
     if tickets_url:
         links.append(f"<a href='{tickets_url}'>Официальная страница / Билеты</a>")
-    if phone:
-        clean_phone = re.sub(r"[^\d+]", "", phone)
-        links.append(f"<b>Справки по телефону:</b> <a href='tel:{clean_phone}'>{phone}</a>")
+    
+    if event.phone:
+        display_phone, tel_phone = format_phone_number(event.phone)
+        links.append(f"<b>Справки по телефону:</b> <a href='tel:{tel_phone}'>{display_phone}</a>")
 
     if links:
         lines.append("\n" + "\n".join(links))
@@ -210,7 +237,7 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
 
 
 async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) -> dict:
-    """Извлечение подробного описания, даты и телефона со страницы события"""
+    """Извлечение подробного описания, даты и телефона со страницы события ТГЛИАМЗ"""
     data = {"description": "", "date_str": "", "time_str": "", "phone": "+7 (8634) 38-34-96", "is_shop": False}
     try:
         async with session.get(detail_url, timeout=10) as resp:
@@ -222,11 +249,23 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                 soup = BeautifulSoup(html_text, "html.parser")
                 
-                # Ищем текст описания
-                content_block = soup.select_one(".content, .news-detail, .workarea, #content")
+                # Улучшенный сбор текста для Bitrix страниц ТГЛИАМЗ
+                content_block = soup.select_one(".detail-text, .news-detail, .content-text, .detail_text, .workarea")
                 if content_block:
-                    paragraphs = [p.get_text(strip=True) for p in content_block.find_all("p") if len(p.get_text(strip=True)) > 20]
+                    # Удаляем ненужные теги скриптов и стилей
+                    for s in content_block(["script", "style"]):
+                        s.extract()
+                    
+                    paragraphs = []
+                    for el in content_block.find_all(["p", "div"]):
+                        txt = el.get_text(strip=True)
+                        # Фильтруем служебный текст и короткие строки
+                        if len(txt) > 30 and not txt.startswith("Тел") and not txt.startswith("Купить"):
+                            if txt not in paragraphs:
+                                paragraphs.append(txt)
+                    
                     if paragraphs:
+                        # Берем первые 2 смысловых абзаца
                         data["description"] = "\n\n".join(paragraphs[:2])
 
                 # Извлечение даты
@@ -234,8 +273,8 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                 if date_match:
                     data["date_str"] = date_match.group(1)
 
-                # Поиск телефона филиала
-                phone_match = re.search(r"(\+?7|8)[\s\(\-]*\d{3}[\s\)\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}", html_text)
+                # Точный поиск телефона музея на странице
+                phone_match = re.search(r"(\+?7|8)[\s\(\-]*\(?8634\)?[\s\(\-]*\d{2,3}[\s\-]*\d{2}[\s\-]*\d{2}", html_text)
                 if phone_match:
                     data["phone"] = phone_match.group(0)
 
