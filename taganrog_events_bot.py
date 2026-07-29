@@ -28,7 +28,7 @@ STRICT_SOUVENIR_WORDS = [
     "музейный магазин", "прейскурант цен на товары", "каталог сувениров"
 ]
 
-# Исключаем общий справочный номер музея (38-34-96), чтобы не путать людей
+# Исключаем общий справочный номер музея (38-34-96)
 EXCLUDED_PHONES = ["383496", "38-34-96"]
 
 MUSEUM_BRANCHES = [
@@ -145,7 +145,7 @@ def is_souvenir_shop_item(text: str) -> bool:
 
 
 def extract_all_phones(text: str) -> List[tuple]:
-    """Извлечение только прямых номеров записи. Номер музея исключается."""
+    """Извлечение городских и мобильных номеров. Общий номер музея исключается."""
     phone_pattern = r"(?:\+?7|8)[\s\(\-]*\d{3,4}[\s\)\-]*\d{2,3}[\s\-]*\d{2}[\s\-]*\d{2}|\b\d{2}-\d{2}-\d{2}\b"
     raw_phones = re.findall(phone_pattern, text)
 
@@ -157,24 +157,29 @@ def extract_all_phones(text: str) -> List[tuple]:
         if not digits:
             continue
 
-        # Жесткий фильтр: пропускаем общий номер музея
+        # Фильтр: пропускаем общий номер музея 38-34-96
         if any(ex in digits for ex in EXCLUDED_PHONES):
             continue
 
+        # Городской 6-значный номер Таганрога
         if len(digits) == 6 and digits not in seen_digits:
             seen_digits.add(digits)
             display = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
             tel = f"+78634{digits}"
             formatted_phones.append((display, tel))
+        
+        # 11-значный номер (мобильный или городской с кодом)
         elif len(digits) == 11 and digits not in seen_digits:
             seen_digits.add(digits)
-            if digits[1] == '9':
+            if digits[1] == '9':  # Мобильный номер
                 display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
-            elif digits[1:5] == '8634':
+                tel = f"+7{digits[1:]}"
+            elif digits[1:5] == '8634':  # Городской с кодом 8634
                 display = f"8 (8634) {digits[5:7]}-{digits[7:9]}-{digits[9:]}"
+                tel = f"+7{digits[1:]}"
             else:
                 display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
-            tel = f"+7{digits[1:]}"
+                tel = f"+7{digits[1:]}"
             formatted_phones.append((display, tel))
 
     return formatted_phones
@@ -213,9 +218,8 @@ def format_caption(event: Event) -> str:
     time_str = html.escape(event.time_str.strip())
     location = html.escape(event.location.strip())
     address = html.escape(event.address.strip())
-    description = event.description.strip()  # Содержит готовую HTML-верстку блоков
+    description = event.description.strip()
     prices = html.escape(event.prices.strip())
-    tickets_url = html.escape(event.tickets_url.strip())
 
     lines = []
 
@@ -228,39 +232,32 @@ def format_caption(event: Event) -> str:
 
     lines.append(f"<b>{title}</b>\n")
 
+    if description:
+        lines.append(f"{description}\n")
+
     if date_str:
         lines.append(f"<b>Дата:</b> {date_str}")
     if time_str:
         lines.append(f"<b>Время:</b> {time_str}")
 
-    if location and address:
-        lines.append(f"<b>Место:</b> {location} ({address})")
-    elif location:
-        lines.append(f"<b>Место:</b> {location}")
-    elif address:
-        lines.append(f"<b>Адрес:</b> {address}")
-
     if prices:
-        lines.append(f"<b>Стоимость:</b> {prices}")
+        lines.append(f"<b>Стоимость билета:</b> {prices}")
 
-    if description:
-        lines.append(f"\n{description}")
+    if location:
+        lines.append(f"\n{location}")
+    if address:
+        lines.append(f"{address}.")
 
-    links = []
-    if tickets_url:
-        links.append(f"<a href='{tickets_url}'>Официальная страница мероприятия</a>")
-
+    # Номер(а) телефона с иконкой — каждый с новой строки
     if event.phones:
-        phone_links = [f"<a href='tel:{tel}'>{disp}</a>" for disp, tel in event.phones]
-        links.append("<b>Телефон для справок и бронирования:</b> " + ", ".join(phone_links))
-
-    if links:
-        lines.append("\n" + "\n".join(links))
+        lines.append("\n📞 <b>Справки и запись:</b>")
+        for disp, tel in event.phones:
+            lines.append(f"<a href='tel:{tel}'>{disp}</a>")
 
     if event.tags:
         lines.append("\n" + " ".join(event.tags))
     else:
-        lines.append("\n#Таганрог #Афиша")
+        lines.append("\n#Таганрог #афиша")
 
     return "\n".join(lines)
 
@@ -316,7 +313,7 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
                                 tickets_url=tickets_url,
                                 buy_ticket_url=tickets_url,
                                 image_url=image_url,
-                                tags=["#Таганрог", "#ТеатрЧехова", "#Афиша"]
+                                tags=["#Таганрог", "#ТеатрЧехова", "#афиша"]
                             )
                         )
     except Exception as e:
@@ -348,13 +345,19 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                 soup = BeautifulSoup(html_text, "html.parser")
 
-                # Поиск прямой ссылки на покупки (Vmuzey / Kassir)
+                # ПОИСК ТОЧНОЙ ССЫЛКИ НА СТРАНИЦУ ПОКУПКИ В VMUZEY
                 for a_tag in soup.find_all("a", href=True):
-                    href = a_tag["href"]
+                    href = a_tag["href"].strip()
                     link_text = a_tag.get_text(strip=True).lower()
-                    if "vmuzey.com" in href or "kassir.ru" in href or "купить билет" in link_text:
+                    
+                    if "vmuzey.com/event" in href:
                         data["buy_ticket_url"] = href
                         break
+                    elif "vmuzey.com" in href:
+                        data["buy_ticket_url"] = href
+                    elif "купить билет" in link_text and href.startswith("http"):
+                        if not data["buy_ticket_url"]:
+                            data["buy_ticket_url"] = href
 
                 content_block = soup.select_one(".detail-text, .news-detail, .content-text, .detail_text, .workarea, .content")
                 full_text = ""
@@ -367,10 +370,9 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                     for el in content_block.find_all(["p", "div"]):
                         txt = el.get_text(strip=True)
-                        if len(txt) < 15 or txt.startswith("Купить"):
+                        if len(txt) < 15 or txt.lower().startswith("купить билет"):
                             continue
 
-                        # Отлавливаем важную информацию мастер-классов
                         if any(phrase in txt.lower() for phrase in ["предварительная запись", "количество мест ограничено", "приглашаются участники", "опыт не важен"]):
                             if txt not in important_notes:
                                 important_notes.append(html.escape(txt))
@@ -382,7 +384,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                     if paragraphs:
                         desc_parts.append("\n\n".join(paragraphs[:2]))
                     if important_notes:
-                        desc_parts.append("📌 <b>Важная информация:</b>\n" + "\n".join([f"• {note}" for note in important_notes]))
+                        desc_parts.append("📌 <b>Важно:</b>\n" + "\n".join([f"• {note}" for note in important_notes]))
 
                     data["description"] = "\n\n".join(desc_parts)
                     full_text = " ".join(paragraphs + important_notes)
@@ -529,12 +531,10 @@ async def main():
             caption = format_caption(event)
             photo_sent = False
 
-            # Создаём Inline-кнопку "Купить билет", если есть прямая ссылка
+            # Инлайн-кнопка для прямой ссылки на Vmuzey
             reply_markup = None
-            target_buy_url = event.buy_ticket_url or (event.tickets_url if "vmuzey" in event.tickets_url else None)
-            
-            if target_buy_url:
-                keyboard = [[InlineKeyboardButton("🎫 Купить билет (Пушкинская карта)", url=target_buy_url)]]
+            if event.buy_ticket_url and "vmuzey.com" in event.buy_ticket_url:
+                keyboard = [[InlineKeyboardButton("🎫 Купить билет (Пушкинская карта)", url=event.buy_ticket_url)]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
             if event.image_url:
