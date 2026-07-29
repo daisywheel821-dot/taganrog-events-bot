@@ -1,11 +1,12 @@
 import asyncio
-import html
 import logging
 import os
 import sqlite3
+import html
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional
+from urllib.parse import urljoin
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -20,43 +21,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===================== НАСТРОЙКИ СТИЛЯ И ИКОНОК =====================
-# Иконки для категорий и полей (можно легко заменить или выключить)
-ICONS = {
-    # Категории
-    "cat_theatre_month": "🎭 ",
-    "cat_theatre_today": "🎭 ",
-    "cat_cinema": "🎬 ",
-    "cat_museum": "🎨 ",
-    "cat_events": "🎪 ",
-    "cat_greenwich": "🌊 ",
-    "cat_aqualazur": "🎢 ",
-    "cat_golden_horse": "🐴 ",
-
-    # Поля деталей
-    "date": "📅 ",
-    "time": "🕐 ",
-    "location": "📍 ",
-    "description": "📝 ",
-    "price": "💰 ",
-    "ticket": "🎟 ",
-    "phone": "📞 ",
-}
-
-# Чтобы полностью отключить эмодзи, раскомментируйте строчку ниже:
-# ICONS = {k: "" for k in ICONS}
-
 
 # ===================== МОДЕЛИ ДАННЫХ =====================
 class Category(Enum):
-    THEATRE_MONTH = "theatre_month"
-    THEATRE_TODAY = "theatre_today"
-    CINEMA = "cinema"
-    MUSEUM = "museum"
-    EVENTS = "events"
-    GREENWICH = "greenwich"
-    AQUALAZUR = "aqualazur"
-    GOLDEN_HORSE = "golden_horse"
+    THEATRE_MONTH = "THEATRE_MONTH"
+    MUSEUM = "MUSEUM"
 
 
 @dataclass
@@ -75,7 +44,7 @@ class Event:
     image_url: Optional[str] = None
 
 
-# ===================== БАЗА ДАННЫХ (ИСКЛЮЧЕНИЕ ДУБЛЕЙ) =====================
+# ===================== РАБОТА С БАЗОЙ ДАННЫХ =====================
 class Database:
     def __init__(self, db_path: str = "data/taganrog_events.db"):
         self.db_path = db_path
@@ -106,162 +75,239 @@ class Database:
             conn.commit()
 
 
-# ===================== ФОРМАТИРОВАНИЕ СООБЩЕНИЙ =====================
+# ===================== ФОРМАТИРОВАНИЕ СООБЩЕНИЙ (БЕЗ ЭМОДЗИ) =====================
 def format_caption(event: Event) -> str:
-    # Безопасное экранирование специальных символов для HTML в Telegram
-    title = html.escape(event.title)
-    date_str = html.escape(event.date_str)
-    time_str = html.escape(event.time_str)
-    location = html.escape(event.location)
-    address = html.escape(event.address)
-    description = html.escape(event.description)
-    prices = html.escape(event.prices)
-    phone = html.escape(event.phone)
-    tickets_url = html.escape(event.tickets_url)
+    title = html.escape(event.title.strip())
+    date_str = html.escape(event.date_str.strip())
+    time_str = html.escape(event.time_str.strip())
+    location = html.escape(event.location.strip())
+    address = html.escape(event.address.strip())
+    description = html.escape(event.description.strip())
+    prices = html.escape(event.prices.strip())
+    phone = html.escape(event.phone.strip())
+    tickets_url = html.escape(event.tickets_url.strip())
 
     lines = []
 
-    # 1. Шапка категории
-    category_titles = {
-        Category.THEATRE_MONTH: f"{ICONS['cat_theatre_month']}<b>АФИША ТЕАТРА НА МЕСЯЦ</b>",
-        Category.THEATRE_TODAY: f"{ICONS['cat_theatre_today']}<b>ТЕАТР СЕГОДНЯ</b>",
-        Category.CINEMA: f"{ICONS['cat_cinema']}<b>КИНО В ТАГАНРОГЕ</b>",
-        Category.MUSEUM: f"{ICONS['cat_museum']}<b>МУЗЕИ И ВЫСТАВКИ</b>",
-        Category.EVENTS: f"{ICONS['cat_events']}<b>СОБЫТИЯ И КОНЦЕРТЫ</b>",
-        Category.GREENWICH: f"{ICONS['cat_greenwich']}<b>ГРИНВИЧ ПАРК SPA</b>",
-        Category.AQUALAZUR: f"{ICONS['cat_aqualazur']}<b>АКВАПАРК «ЛАЗУРНЫЙ»</b>",
-        Category.GOLDEN_HORSE: f"{ICONS['cat_golden_horse']}<b>КЛУБ «ГОЛДЕН ХОРС»</b>",
-    }
-    
-    header = category_titles.get(event.category, "<b>АФИША ТАГАНРОГА</b>")
-    lines.append(header)
+    # 1. Заголовок категории (строгий стиль)
+    if event.category == Category.THEATRE_MONTH:
+        lines.append("<b>ТАГАНРОГСКИЙ ТЕАТР ИМ. А.П. ЧЕХОВА</b>")
+        lines.append("<i>Репертуар и анонс спектаклей</i>\n")
+    elif event.category == Category.MUSEUM:
+        lines.append("<b>МУЗЕИ И ВЫСТАВКИ ТАГАНРОГА</b>")
+        lines.append("<i>Таганрогский музей-заповедник</i>\n")
 
     # 2. Название мероприятия
-    lines.append(f"\n<b>{title}</b>\n")
+    lines.append(f"<b>{title}</b>\n")
 
     # 3. Дата и время
-    date_time_parts = []
+    date_parts = []
     if date_str:
-        date_time_parts.append(f"{ICONS['date']}{date_str}")
+        date_parts.append(f"<b>Дата:</b> {date_str}")
     if time_str:
-        date_time_parts.append(f"{ICONS['time']}{time_str}")
-    if date_time_parts:
-        lines.append(" | ".join(date_time_parts))
+        date_parts.append(f"<b>Время:</b> {time_str}")
+    if date_parts:
+        lines.append(" | ".join(date_parts))
 
     # 4. Локация и адрес
-    loc_icon = ICONS['location']
     if location and address:
-        lines.append(f"{loc_icon}{location} ({address})")
+        lines.append(f"<b>Место:</b> {location} ({address})")
     elif location:
-        lines.append(f"{loc_icon}{location}")
+        lines.append(f"<b>Место:</b> {location}")
     elif address:
-        lines.append(f"{loc_icon}{address}")
+        lines.append(f"<b>Адрес:</b> {address}")
 
-    # 5. Описание
-    if description:
-        lines.append(f"\n{ICONS['description']}{description}")
-
-    # 6. Стоимость
+    # 5. Стоимость
     if prices:
-        lines.append(f"{ICONS['price']}{prices}")
+        lines.append(f"<b>Стоимость:</b> {prices}")
 
-    # 7. Билеты и телефон
-    contact_parts = []
+    # 6. Краткое описание (если есть)
+    if description:
+        lines.append(f"\n{description}")
+
+    # 7. Контакты и ссылка на билеты
+    links = []
     if tickets_url:
-        contact_parts.append(f"{ICONS['ticket']}<a href='{tickets_url}'>Купить билет / Подробнее</a>")
+        links.append(f"<a href='{tickets_url}'>Официальная страница / Билеты</a>")
     if phone:
-        contact_parts.append(f"{ICONS['phone']}{phone}")
-    
-    if contact_parts:
-        lines.append("\n" + "\n".join(contact_parts))
+        links.append(f"<b>Справки по телефону:</b> {phone}")
 
-    # 8. Тематические хэштеги
-    hashtags = {
-        Category.THEATRE_MONTH: "#Таганрог #Театр #Афиша",
-        Category.THEATRE_TODAY: "#Таганрог #Театр #Спектакль",
-        Category.CINEMA: "#Таганрог #Кино #Афиша",
-        Category.MUSEUM: "#Таганрог #Музей #Выставка",
-        Category.EVENTS: "#Таганрог #Афиша #Концерт",
-        Category.GREENWICH: "#Таганрог #Отдых #SPA",
-        Category.AQUALAZUR: "#Таганрог #Отдых #Аквапарк",
-        Category.GOLDEN_HORSE: "#Таганрог #Развлечения",
-    }
-    
-    lines.append(f"\n{hashtags.get(event.category, '#Таганрог #Афиша')}")
+    if links:
+        lines.append("\n" + "\n".join(links))
+
+    # 8. Хэштеги
+    if event.category == Category.THEATRE_MONTH:
+        lines.append("\n#Таганрог #ТеатрЧехова #Афиша")
+    else:
+        lines.append("\n#Таганрог #Музей #Выставка")
 
     return "\n".join(lines)
 
 
-# ===================== СБОР СОБЫТИЙ (ПАРСИНГ) =====================
-async def fetch_events() -> List[Event]:
-    """
-    Основная функция для сбора данных с сайтов.
-    Замените или дополните этот блок вашими BeautifulSoup-селекторами.
-    """
-    events: List[Event] = []
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+# ===================== МОДУЛИ ПАРСИНГА =====================
+async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
+    events = []
+    url = "https://www.chehovsky.ru/afishateatra/"
+    base_url = "https://www.chehovsky.ru"
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        # Пример: Сбор афиши театра им. Чехова
-        try:
-            url = "https://www.chehovsky.ru/"
-            async with session.get(url, timeout=15) as response:
-                if response.status == 200:
-                    html_content = await response.text()
-                    soup = BeautifulSoup(html_content, "html.parser")
-                    
-                    # Логика вашего парсера добавляется сюда...
-                    # Ниже тестовый элемент для проверки работоспособности:
+    try:
+        async with session.get(url, timeout=15) as response:
+            if response.status != 200:
+                logger.error(f"Не удалось открыть сайт театра: статус {response.status}")
+                return events
+
+            html_content = await response.text()
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            # Поиск карточек спектаклей в афише
+            cards = soup.select(".afisha-item, .event-item, .performance-item, tr.afisha_row")
+            if not cards:
+                # Альтернативный поиск по таблицам/блокам расписания
+                cards = soup.find_all("div", class_=lambda c: c and "afisha" in c)
+
+            for card in cards:
+                title_el = card.select_one(".title, .name, h3, h4, .afisha_title")
+                date_el = card.select_one(".date, .afisha_date")
+                time_el = card.select_one(".time, .afisha_time")
+                price_el = card.select_one(".price, .afisha_price")
+                img_el = card.select_one("img")
+                link_el = card.select_one("a[href]")
+
+                if title_el:
+                    title = title_el.get_text(strip=True)
+                    date_str = date_el.get_text(strip=True) if date_el else ""
+                    time_str = time_el.get_text(strip=True) if time_el else ""
+                    prices = price_el.get_text(strip=True) if price_el else "Уточняйте в кассе"
+
+                    tickets_url = url
+                    if link_el and link_el.get("href"):
+                        tickets_url = urljoin(base_url, link_el["href"])
+
+                    image_url = None
+                    if img_el and img_el.get("src"):
+                        image_url = urljoin(base_url, img_el["src"])
+
+                    # Формируем уникальный ID для базы данных
+                    event_id = f"chehov_{hash(title + date_str)}"
+
                     events.append(
                         Event(
-                            event_id="chehov_demo_001",
-                            category=Category.THEATRE_TODAY,
-                            title="Спектакль «Палата №6»",
-                            date_str="Сегодня",
-                            time_str="19:00",
+                            event_id=event_id,
+                            category=Category.THEATRE_MONTH,
+                            title=title,
+                            date_str=date_str,
+                            time_str=time_str,
                             location="Театр им. А.П. Чехова",
                             address="ул. Петровская, 90",
-                            description="Постановка классического произведения А.П. Чехова.",
-                            prices="от 400 руб.",
+                            prices=prices,
                             phone="+7 (8634) 38-29-68",
-                            tickets_url="https://www.chehovsky.ru/",
-                            image_url=None
+                            tickets_url=tickets_url,
+                            image_url=image_url
                         )
                     )
-        except Exception as e:
-            logger.error(f"Ошибка при сборе данных с {url}: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка парсинга Театра Чехова: {e}")
 
     return events
 
 
-# ===================== ОСНОВНОЙ ЦИКЛ ЗАПУСКА =====================
+async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
+    events = []
+    url = "https://tgliamz.ru/calendar/"
+    base_url = "https://tgliamz.ru"
+
+    try:
+        async with session.get(url, timeout=15) as response:
+            if response.status != 200:
+                logger.error(f"Не удалось открыть сайт музеев: статус {response.status}")
+                return events
+
+            html_content = await response.text()
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            # Поиск элементов выставок и событий
+            items = soup.select(".news-item, .event-card, .calendar-item, .item")
+            for item in items:
+                title_el = item.select_one(".title, .name, h2, h3")
+                date_el = item.select_one(".date, .time")
+                loc_el = item.select_one(".location, .place, .museum-title")
+                img_el = item.select_one("img")
+                link_el = item.select_one("a[href]")
+
+                if title_el:
+                    title = title_el.get_text(strip=True)
+                    date_str = date_el.get_text(strip=True) if date_el else "Действующая выставка"
+                    location = loc_el.get_text(strip=True) if loc_el else "Таганрогский музей-заповедник"
+
+                    tickets_url = url
+                    if link_el and link_el.get("href"):
+                        tickets_url = urljoin(base_url, link_el["href"])
+
+                    image_url = None
+                    if img_el and img_el.get("src"):
+                        image_url = urljoin(base_url, img_el["src"])
+
+                    event_id = f"tgliamz_{hash(title + date_str)}"
+
+                    events.append(
+                        Event(
+                            event_id=event_id,
+                            category=Category.MUSEUM,
+                            title=title,
+                            date_str=date_str,
+                            location=location,
+                            tickets_url=tickets_url,
+                            image_url=image_url
+                        )
+                    )
+    except Exception as e:
+        logger.error(f"Ошибка парсинга Музеев (ТГЛИАМЗ): {e}")
+
+    return events
+
+
+async def fetch_events() -> List[Event]:
+    all_events = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        # 1. Запрос к театру
+        chehov_events = await parse_chehov_theatre(session)
+        all_events.extend(chehov_events)
+
+        # 2. Запрос к музеям
+        museum_events = await parse_tgliamz_museums(session)
+        all_events.extend(museum_events)
+
+    return all_events
+
+
+# ===================== ОСНОВНЫЙ ЦИКЛ ОТПРАВКИ =====================
 async def main():
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    channel_id = os.getenv("TELEGRAM_CHANNEL_ID")
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+    channel_id = os.getenv("TELEGRAM_CHANNEL_ID") or os.getenv("CHAT_ID")
 
     if not bot_token or not channel_id:
-        logger.error("ОШИБКА: TELEGRAM_BOT_TOKEN или TELEGRAM_CHANNEL_ID не заданы в переменных окружения!")
+        logger.error("ОШИБКА: Переменные BOT_TOKEN или CHAT_ID не найдены!")
         return
 
     bot = Bot(token=bot_token)
     db = Database()
 
-    logger.info("Бот запущен. Сбор актуальных событий...")
+    logger.info("Запуск Этапа 1: Парсинг Театра Чехова и Музеев...")
     events = await fetch_events()
-    logger.info(f"Найдено событий для проверки: {len(events)}")
+    logger.info(f"Всего найдено мероприятий: {len(events)}")
 
     for event in events:
-        # Пропускаем, если событие уже отправлялось ранее
         if db.is_sent(event.event_id):
-            logger.info(f"Событие [{event.event_id}] уже было отправлено, пропускаем.")
+            logger.info(f"Событие [{event.title}] уже было отправлено, пропускаем.")
             continue
 
         caption = format_caption(event)
 
         try:
-            # Отправка с фото или только текстом
             if event.image_url:
                 await bot.send_photo(
                     chat_id=channel_id,
@@ -277,19 +323,18 @@ async def main():
                     disable_web_page_preview=False
                 )
 
-            # Отмечаем как отправленное
             db.mark_as_sent(event.event_id)
-            logger.info(f"Успешно опубликовано: {event.title}")
+            logger.info(f"Успешно отправлено: {event.title}")
 
-            # Пауза 2 секунды, чтобы соблюдать лимиты Telegram API
+            # Задержка 2 секунды между сообщениями для защиты от лимитов Telegram
             await asyncio.sleep(2)
 
         except TelegramError as e:
-            logger.error(f"Ошибка Telegram API при отправке [{event.event_id}]: {e}")
+            logger.error(f"Ошибка отправки Telegram для [{event.title}]: {e}")
         except Exception as e:
-            logger.error(f"Неизвестная ошибка при отправке [{event.event_id}]: {e}")
+            logger.error(f"Неизвестная ошибка: {e}")
 
-    logger.info("Выполнение задачи завершено.")
+    logger.info("Этап 1 успешно завершен.")
 
 
 if __name__ == "__main__":
