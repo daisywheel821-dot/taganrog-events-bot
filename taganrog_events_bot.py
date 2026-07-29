@@ -28,7 +28,6 @@ STRICT_SOUVENIR_WORDS = [
     "музейный магазин", "прейскурант цен на товары", "каталог сувениров"
 ]
 
-# Жесткий фильтр для общего справочного номера музея (38-34-96)
 EXCLUDED_PHONES = ["383496", "38-34-96"]
 
 MUSEUM_BRANCHES = [
@@ -100,7 +99,7 @@ class Event:
     address: str = ""
     description: str = ""
     prices: str = ""
-    phones: List[tuple] = field(default_factory=list)  # [(display_phone, tel_link)]
+    phones: List[tuple] = field(default_factory=list)
     tickets_url: str = ""
     buy_ticket_url: str = ""
     image_url: Optional[str] = None
@@ -145,7 +144,6 @@ def is_souvenir_shop_item(text: str) -> bool:
 
 
 def extract_all_phones(text: str) -> List[tuple]:
-    """Извлечение городских и мобильных номеров. Общий номер музея исключается."""
     phone_pattern = r"(?:\+?7|8)[\s\(\-]*\d{3,4}[\s\)\-]*\d{2,3}[\s\-]*\d{2}[\s\-]*\d{2}|\b\d{2}-\d{2}-\d{2}\b"
     raw_phones = re.findall(phone_pattern, text)
 
@@ -157,24 +155,20 @@ def extract_all_phones(text: str) -> List[tuple]:
         if not digits:
             continue
 
-        # Гарантированный фильтр общего номера музея (38-34-96)
         if any(ex in digits for ex in EXCLUDED_PHONES):
             continue
 
-        # Городской 6-значный номер Таганрога
         if len(digits) == 6 and digits not in seen_digits:
             seen_digits.add(digits)
             display = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
             tel = f"+78634{digits}"
             formatted_phones.append((display, tel))
-        
-        # 11-значный номер (мобильный или городской с кодом)
         elif len(digits) == 11 and digits not in seen_digits:
             seen_digits.add(digits)
-            if digits[1] == '9':  # Мобильный номер
+            if digits[1] == '9':
                 display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
                 tel = f"+7{digits[1:]}"
-            elif digits[1:5] == '8634':  # Городской с кодом 8634
+            elif digits[1:5] == '8634':
                 display = f"8 (8634) {digits[5:7]}-{digits[7:9]}-{digits[9:]}"
                 tel = f"+7{digits[1:]}"
             else:
@@ -227,7 +221,8 @@ def format_caption(event: Event) -> str:
         lines.append("<b>ТАГАНРОГСКИЙ ТЕАТР ИМ. А.П. ЧЕХОВА</b>")
         lines.append("<i>Репертуар и анонс спектаклей</i>\n")
     elif event.category == Category.MUSEUM:
-        lines.append("<b>МЕРОПРИЯТИЯ МУЗЕЕВ ТАГАНРОГА</b>")
+        # Вернули точное название, которое вам нравилось:
+        lines.append("<b>МУЗЕИ И ВЫСТАВКИ ТАГАНРОГА</b>")
         lines.append("<i>Таганрогский музей-заповедник</i>\n")
 
     lines.append(f"<b>{title}</b>\n")
@@ -248,7 +243,6 @@ def format_caption(event: Event) -> str:
     if address:
         lines.append(f"{address}.")
 
-    # Вывод телефонов списком (каждый с новой строки)
     if event.phones:
         lines.append("\n📞 <b>Справки и запись:</b>")
         for disp, tel in event.phones:
@@ -345,7 +339,6 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                 soup = BeautifulSoup(html_text, "html.parser")
 
-                # Сбор прямой ссылки на Vmuzey (если есть)
                 for a_tag in soup.find_all("a", href=True):
                     href = a_tag["href"].strip()
                     link_text = a_tag.get_text(strip=True).lower()
@@ -360,8 +353,6 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                             data["buy_ticket_url"] = href
 
                 content_block = soup.select_one(".detail-text, .news-detail, .content-text, .detail_text, .workarea, .content")
-                
-                # Поиск номеров по всему тексту страницы (чтобы не упустить мобильные и прямые контакты)
                 page_full_text = soup.get_text()
                 data["phones"] = extract_all_phones(page_full_text)
 
@@ -428,9 +419,10 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                 html_content = await response.text()
                 soup = BeautifulSoup(html_content, "html.parser")
 
-                items = soup.select(".news-item, .event-card, .calendar-item, .item, .col-md-4, .col-sm-6")
+                # Добавили универсальные селекторы колонок сетки, в которых на сайте выводятся мастер-классы
+                items = soup.select(".news-item, .event-card, .calendar-item, .item, .col-md-4, .col-sm-6, .col-xs-12")
                 for item in items:
-                    title_el = item.select_one(".title, .name, h2, h3, h4")
+                    title_el = item.select_one(".title, .name, h2, h3, h4, a")
                     date_el = item.select_one(".date, .time")
                     loc_el = item.select_one(".location, .place, .museum-title")
                     img_el = item.select_one("img")
@@ -448,6 +440,9 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                         if link_el and link_el.get("href"):
                             tickets_url = urljoin(base_url, link_el["href"])
 
+                        # Исправление: привязка ID строго к URL карточки, чтобы мастер-классы не пропадали из-за совпадения дат
+                        event_id = f"tgliamz_{hash(tickets_url)}"
+
                         detail_data = await parse_tgliamz_detail(session, tickets_url)
                         if detail_data["is_shop"]:
                             continue
@@ -462,8 +457,6 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                             title + " " + detail_data["description"], 
                             detail_data["branch_tag"]
                         )
-
-                        event_id = f"tgliamz_{hash(title + (date_str or detail_data['date_str']) + tickets_url)}"
 
                         events.append(
                             Event(
@@ -486,7 +479,13 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
     except Exception as e:
         logger.error(f"Ошибка парсинга Музеев (ТГЛИАМЗ): {e}")
 
-    return events
+    # Исключение дубликатов при однократном сканировании
+    unique_events = {}
+    for ev in events:
+        if ev.event_id not in unique_events:
+            unique_events[ev.event_id] = ev
+
+    return list(unique_events.values())
 
 
 async def fetch_events(session: aiohttp.ClientSession) -> List[Event]:
@@ -529,7 +528,6 @@ async def main():
             caption = format_caption(event)
             photo_sent = False
 
-            # Инлайн-кнопка отправляется строго ТОЛЬКО если есть рабочая ссылка Vmuzey
             reply_markup = None
             if event.buy_ticket_url and "vmuzey.com" in event.buy_ticket_url:
                 keyboard = [[InlineKeyboardButton("🎫 Купить билет (Пушкинская карта)", url=event.buy_ticket_url)]]
