@@ -190,13 +190,12 @@ def extract_all_phones(text: str, primary_phone: Optional[tuple] = None) -> List
     formatted_phones = []
     seen_digits = set()
 
-    # Если задан телефон филиала — выводим ТОЛЬКО его
+    # Если задан прямой телефон филиала — выводим ТОЛЬКО его
     if primary_phone:
-        p_disp, p_tel = primary_phone
         formatted_phones.append(primary_phone)
         return formatted_phones
 
-    # Иначе собираем остальные найденные телефоны, исключая общий справочный
+    # Иначе собираем найденные телефоны, исключая общий справочный номер музея
     for raw in raw_phones:
         digits = re.sub(r"\D", "", raw)
         if not digits:
@@ -393,9 +392,10 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
                             tickets_url = urljoin(base_url, link_el["href"])
 
                         image_url = None
-                        if img_el and (img_el.get("src") or img_el.get("data-src")):
-                            src = img_el.get("src") or img_el.get("data-src")
-                            image_url = urljoin(base_url, src)
+                        if img_el:
+                            src = img_el.get("src") or img_el.get("data-src") or img_el.get("data-lazy")
+                            if src:
+                                image_url = urljoin(base_url, src)
 
                         event_id = f"chehov_{hash(title + date_str + tickets_url)}"
 
@@ -461,7 +461,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str, 
 
                 data["event_type"] = detect_event_type(soup, card_title, page_full_text)
 
-                # Поиск изображений (включая атрибуты lazy-loading)
+                # Дополнительный поиск фото на самой детальной странице, если его не было в карточке
                 img_el = main_content.select_one("img")
                 if img_el:
                     src = img_el.get("src") or img_el.get("data-src") or img_el.get("data-original")
@@ -495,7 +495,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str, 
                     data["prices"] = price_match.group(1).strip()
 
     except Exception as e:
-        logger.warning(f"Ошибка парсинга {detail_url}: {e}")
+        logger.warning(f"Ошибка парсинга детальной страницы {detail_url}: {e}")
     return data
 
 
@@ -529,8 +529,19 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
 
                     date_el = item.select_one(".date, .time, .calendar-date")
                     loc_el = item.select_one(".location, .place, .museum-title")
-                    img_el = item.select_one("img")
                     
+                    # Прямой парсинг превью-изображения из карточки
+                    img_el = item.select_one("img")
+                    card_image_url = None
+                    if img_el:
+                        src = img_el.get("src") or img_el.get("data-src") or img_el.get("data-original") or img_el.get("style")
+                        if src and "url(" in src:
+                            match = re.search(r"url\((['\"]?)(.*?)\1\)", src)
+                            if match:
+                                src = match.group(2)
+                        if src and not src.startswith("data:"):
+                            card_image_url = urljoin(base_url, src)
+
                     link_el = item if item.name == 'a' else item.select_one("a[href]")
 
                     date_str = date_el.get_text(strip=True) if date_el else ""
@@ -546,11 +557,8 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                     if detail_data["is_shop"]:
                         continue
 
-                    image_url = detail_data["image_url"]
-                    if not image_url and img_el:
-                        src = img_el.get("src") or img_el.get("data-src") or img_el.get("data-original")
-                        if src and not src.startswith("data:"):
-                            image_url = urljoin(base_url, src)
+                    # Выбираем лучшее фото (преимущество у детального, либо берем с карточки)
+                    final_image_url = detail_data["image_url"] or card_image_url
 
                     final_location = detail_data["location"] or location_card
                     final_tags = generate_museum_tags(
@@ -574,7 +582,7 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                             phones=detail_data["phones"],
                             tickets_url=tickets_url,
                             buy_ticket_url=detail_data["buy_ticket_url"],
-                            image_url=image_url,
+                            image_url=final_image_url,
                             tags=final_tags
                         )
                     )
@@ -601,21 +609,22 @@ async def fetch_events(session: aiohttp.ClientSession) -> List[Event]:
 
 
 async def download_image(session: aiohttp.ClientSession, url: str) -> Optional[io.BytesIO]:
-    """Надежное скачивание изображения с эмуляцией браузере."""
-    img_headers = {
+    """Скачивание картинки с правильными заголовками."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
         "Referer": "https://tgliamz.ru/"
     }
     try:
-        async with session.get(url, headers=img_headers, timeout=12) as resp:
+        async with session.get(url, headers=headers, timeout=12) as resp:
             if resp.status == 200:
                 data = await resp.read()
-                if len(data) > 1000:  # Защита от пустых ответов
+                if len(data) > 500:
                     file_stream = io.BytesIO(data)
                     file_stream.name = "image.jpg"
                     return file_stream
     except Exception as e:
-        logger.warning(f"Не удалось скачать картинку {url}: {e}")
+        logger.warning(f"Ошибка скачивания фото по адресу {url}: {e}")
     return None
 
 
@@ -671,9 +680,8 @@ async def main():
                         )
                         photo_sent = True
                     except Exception as e:
-                        logger.warning(f"Ошибка отправки фото потоком [{event.title}]: {e}")
+                        logger.warning(f"Ошибка отправки фото байтами [{event.title}]: {e}")
 
-                # Запасной вариант — отправка прямой ссылкой
                 if not photo_sent:
                     try:
                         await bot.send_photo(
@@ -685,7 +693,7 @@ async def main():
                         )
                         photo_sent = True
                     except Exception as e:
-                        logger.warning(f"Ошибка отправки фото ссылкой [{event.title}]: {e}")
+                        logger.warning(f"Ошибка отправки фото по ссылке [{event.title}]: {e}")
 
             if not photo_sent:
                 try:
@@ -697,7 +705,7 @@ async def main():
                         reply_markup=reply_markup
                     )
                 except TelegramError as e:
-                    logger.error(f"Ошибка отправки текста для [{event.title}]: {e}")
+                    logger.error(f"Ошибка отправки сообщения без фото [{event.title}]: {e}")
                     continue
 
             db.mark_as_sent(event.event_id)
