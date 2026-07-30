@@ -9,11 +9,11 @@ from datetime import datetime, date
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
@@ -29,8 +29,8 @@ STRICT_SOUVENIR_WORDS = [
     "музейный магазин", "прейскурант цен на товары", "каталог сувениров"
 ]
 
-# Общий телефон музея, который НЕ нужно выводить повторно/вверху
-EXCLUDED_PHONES = ["383496", "38-34-96"]
+# Цифры общего телефона, который нужно полностью исключать
+EXCLUDED_PHONE_DIGITS = ["8634383496", "383496"]
 
 MONTH_MAP = {
     "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
@@ -43,57 +43,49 @@ MUSEUM_BRANCHES = [
         "keys": ["литературный музей", "литературно-музыкальн"],
         "name": "Литературный музей\nА.П. Чехова",
         "address": "ул. Октябрьская, 9",
-        "tag": "#ЛитературныйМузейЧехова",
-        "primary_phone": ("8 (8634) 61-00-13", "+78634610013")
+        "tag": "#ЛитературныйМузейЧехова"
     },
     {
-        "keys": ["юрнкц", "южно-российский"],
+        "keys": ["юрНКц", "южно-российский"],
         "name": "ЮРНКЦ\nА.П. Чехова",
         "address": "ул. Октябрьская, 9",
-        "tag": "#ЮРНКЦЧехова",
-        "primary_phone": ("8 (8634) 61-00-13", "+78634610013")
+        "tag": "#ЮРНКЦЧехова"
     },
     {
         "keys": ["дворец алфераки", "историко-краеведческий"],
         "name": "Историко-краеведческий музей\n(Дворец Алфераки)",
         "address": "ул. Фрунзе, 41",
-        "tag": "#ДворецАлфераки",
-        "primary_phone": ("8 (8634) 38-34-96", "+78634383496")
+        "tag": "#ДворецАлфераки"
     },
     {
         "keys": ["домик чехова"],
         "name": "Музей «Домик Чехова»",
         "address": "ул. Чехова, 69",
-        "tag": "#ДомикЧехова",
-        "primary_phone": ("8 (8634) 39-42-76", "+78634394276")
+        "tag": "#ДомикЧехова"
     },
     {
         "keys": ["лавка чеховых", "лавка чехова"],
         "name": "Музей «Лавка Чеховых»",
         "address": "ул. Александровская, 100",
-        "tag": "#ЛавкаЧеховых",
-        "primary_phone": ("8 (8634) 61-27-82", "+78634612782")
+        "tag": "#ЛавкаЧеховых"
     },
     {
         "keys": ["градостроительства"],
         "name": "Музей градостроительства и быта",
         "address": "ул. Фрунзе, 80",
-        "tag": "#МузейГрадостроительства",
-        "primary_phone": ("8 (8634) 61-43-32", "+78634614332")
+        "tag": "#МузейГрадостроительства"
     },
     {
         "keys": ["дурова"],
         "name": "Музей А.А. Дурова",
         "address": "ул. А. Глушко, 44",
-        "tag": "#МузейДурова",
-        "primary_phone": ("8 (8634) 61-40-31", "+78634614031")
+        "tag": "#МузейДурова"
     },
     {
         "keys": ["василенко"],
         "name": "Музей И.Д. Василенко",
         "address": "ул. Чехова, 88",
-        "tag": "#МузейВасиленко",
-        "primary_phone": ("8 (8634) 61-36-73", "+78634613673")
+        "tag": "#МузейВасиленко"
     }
 ]
 
@@ -183,47 +175,102 @@ def parse_event_date(date_text: str) -> Optional[date]:
     return None
 
 
-def extract_all_phones(text: str, primary_phone: Optional[tuple] = None) -> List[tuple]:
-    phone_pattern = r"(?:\+?7|8)[\s\(\-]*\d{3,4}[\s\)\-]*\d{2,3}[\s\-]*\d{2}[\s\-]*\d{2}|\b\d{2}-\d{2}-\d{2}\b"
-    raw_phones = re.findall(phone_pattern, text)
-
+def extract_targeted_phones(text: str) -> List[tuple]:
+    """Парсит телефоны ТОЛЬКО после ключевых фраз (справки, запись и т.д.)."""
+    
+    # Ключевые фразы, после которых ищем номера
+    trigger_patterns = [
+        r"телефон[ы]?\s+для\s+(?:справок|записи)[^:\n]*[:\s]?",
+        r"справки\s+по\s+телефон[уам][:\s]?",
+        r"запись\s+по\s+телефон[уам][:\s]?",
+        r"информация\s+по\s+телефон[уам][:\s]?",
+        r"бронирование\s+билетов\s+по\s+телефон[уам][:\s]?"
+    ]
+    
+    combined_trigger = "|".join(trigger_patterns)
+    
+    # Регулярное выражение для поиска фрагментов текста сразу после ключевых слов
+    segments = re.split(f"({combined_trigger})", text, flags=re.IGNORECASE)
+    
+    phone_pattern = r"(?:\+?7|8)?[\s\(\-]*\d{3,4}[\s\)\-]*\d{2,3}[\s\-]*\d{2}[\s\-]*\d{2}|\b\d{2}[\s\-]?\d{2}[\s\-]?\d{2}\b"
+    
     formatted_phones = []
     seen_digits = set()
 
-    # Если задан прямой телефон филиала — выводим ТОЛЬКО его
-    if primary_phone:
-        formatted_phones.append(primary_phone)
-        return formatted_phones
+    for i in range(1, len(segments), 2):
+        # Берём кусок текста сразу после найденной фразы (ограничиваем 150 символами)
+        target_chunk = segments[i+1][:150] if (i+1) < len(segments) else ""
+        raw_phones = re.findall(phone_pattern, target_chunk)
 
-    # Иначе собираем найденные телефоны, исключая общий справочный номер музея
-    for raw in raw_phones:
-        digits = re.sub(r"\D", "", raw)
-        if not digits:
-            continue
+        for raw in raw_phones:
+            digits = re.sub(r"\D", "", raw)
+            if not digits:
+                continue
 
-        if any(ex in digits for ex in EXCLUDED_PHONES):
-            continue
+            # Исключаем главный справочный телефон музея (38-34-96)
+            if any(ex in digits for ex in EXCLUDED_PHONE_DIGITS):
+                continue
 
-        if len(digits) == 6 and digits not in seen_digits:
-            seen_digits.add(digits)
-            display = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
-            tel = f"+78634{digits}"
-            formatted_phones.append((display, tel))
+            # Обработка 6-значных городских номеров (например, 61-14-66)
+            if len(digits) == 6:
+                if digits in seen_digits or f"8634{digits}" in seen_digits:
+                    continue
+                seen_digits.add(digits)
+                seen_digits.add(f"8634{digits}")
+                
+                display = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
+                tel = f"+78634{digits}"
+                formatted_phones.append((display, tel))
 
-        elif len(digits) == 11 and digits not in seen_digits:
-            seen_digits.add(digits)
-            if digits[1] == '9':
-                display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
-                tel = f"+7{digits[1:]}"
-            elif digits[1:5] == '8634':
-                display = f"8 (8634) {digits[5:7]}-{digits[7:9]}-{digits[9:]}"
-                tel = f"+7{digits[1:]}"
-            else:
-                display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
-                tel = f"+7{digits[1:]}"
-            formatted_phones.append((display, tel))
+            # Обработка 11-значных номеров (8-999-692-04-53 или 8 (8634) 61-14-66)
+            elif len(digits) in (10, 11):
+                if len(digits) == 10:
+                    digits = "7" + digits
+                elif digits.startswith("8"):
+                    digits = "7" + digits[1:]
+
+                if digits in seen_digits:
+                    continue
+                seen_digits.add(digits)
+
+                # Мобильные номера (+7 9xx ...)
+                if digits[1] == '9':
+                    display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
+                    tel = f"+{digits}"
+                # Городские Таганрога (+7 8634 ...)
+                elif digits[1:5] == '8634':
+                    display = f"8 (8634) {digits[5:7]}-{digits[7:9]}-{digits[9:]}"
+                    tel = f"+{digits}"
+                else:
+                    display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
+                    tel = f"+{digits}"
+
+                formatted_phones.append((display, tel))
 
     return formatted_phones
+
+
+def clean_image_url(base_url: str, raw_src: str) -> Optional[str]:
+    """Очищает и проверяет валидность URL картинки."""
+    if not raw_src:
+        return None
+
+    if "url(" in raw_src:
+        match = re.search(r"url\((['\"]?)(.*?)\1\)", raw_src)
+        if match:
+            raw_src = match.group(2)
+
+    raw_src = raw_src.strip()
+    if raw_src.startswith("data:") or raw_src.endswith(".svg") or raw_src.endswith(".gif"):
+        return None
+
+    full_url = urljoin(base_url, raw_src)
+    path = urlparse(full_url).path.lower()
+    
+    if any(path.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+        return full_url
+
+    return None
 
 
 def detect_event_type(soup: BeautifulSoup, title: str, full_text: str) -> str:
@@ -345,7 +392,7 @@ def format_caption(event: Event) -> str:
 
     # 5. Телефоны
     if event.phones:
-        lines.append("\n📞 <b>Справки по телефону:</b>")
+        lines.append("\n📞 <b>Справки и запись по телефону:</b>")
         for disp, tel in event.phones:
             lines.append(f"<a href='tel:{tel}'>{disp}</a>")
 
@@ -393,9 +440,8 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
 
                         image_url = None
                         if img_el:
-                            src = img_el.get("src") or img_el.get("data-src") or img_el.get("data-lazy")
-                            if src:
-                                image_url = urljoin(base_url, src)
+                            src = img_el.get("src") or img_el.get("data-src")
+                            image_url = clean_image_url(base_url, src)
 
                         event_id = f"chehov_{hash(title + date_str + tickets_url)}"
 
@@ -411,7 +457,7 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
                                 location="Таганрогский театр\nим. А.П. Чехова",
                                 address="ул. Петровская, 90",
                                 prices=prices,
-                                phones=extract_all_phones("8 (8634) 38-29-68"),
+                                phones=[("8 (8634) 38-29-68", "+78634382968")],
                                 tickets_url=tickets_url,
                                 buy_ticket_url="",
                                 image_url=image_url,
@@ -461,25 +507,25 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str, 
 
                 data["event_type"] = detect_event_type(soup, card_title, page_full_text)
 
-                # Дополнительный поиск фото на самой детальной странице, если его не было в карточке
-                img_el = main_content.select_one("img")
-                if img_el:
-                    src = img_el.get("src") or img_el.get("data-src") or img_el.get("data-original")
-                    if src and not src.startswith("data:"):
-                        data["image_url"] = urljoin("https://tgliamz.ru", src)
+                # Поиск фото
+                for img in main_content.select("img"):
+                    src = img.get("src") or img.get("data-src") or img.get("data-original")
+                    cleaned_img = clean_image_url("https://tgliamz.ru", src)
+                    if cleaned_img:
+                        data["image_url"] = cleaned_img
+                        break
 
                 data["requires_booking"] = check_requires_booking(page_full_text)
 
-                primary_phone = None
                 for branch in MUSEUM_BRANCHES:
                     if any(k in page_full_text.lower() for k in branch["keys"]):
                         data["location"] = branch["name"]
                         data["address"] = branch["address"]
                         data["branch_tag"] = branch["tag"]
-                        primary_phone = branch.get("primary_phone")
                         break
 
-                data["phones"] = extract_all_phones(page_full_text, primary_phone=primary_phone)
+                # Извлекаем телефоны СТРОГО после целевых фраз
+                data["phones"] = extract_targeted_phones(page_full_text)
 
                 date_match = re.search(r"((?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье)?,?\s*\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))", page_full_text, re.I)
                 if date_match:
@@ -530,17 +576,11 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                     date_el = item.select_one(".date, .time, .calendar-date")
                     loc_el = item.select_one(".location, .place, .museum-title")
                     
-                    # Прямой парсинг превью-изображения из карточки
                     img_el = item.select_one("img")
                     card_image_url = None
                     if img_el:
-                        src = img_el.get("src") or img_el.get("data-src") or img_el.get("data-original") or img_el.get("style")
-                        if src and "url(" in src:
-                            match = re.search(r"url\((['\"]?)(.*?)\1\)", src)
-                            if match:
-                                src = match.group(2)
-                        if src and not src.startswith("data:"):
-                            card_image_url = urljoin(base_url, src)
+                        src = img_el.get("src") or img_el.get("data-src") or img_el.get("style")
+                        card_image_url = clean_image_url(base_url, src)
 
                     link_el = item if item.name == 'a' else item.select_one("a[href]")
 
@@ -557,14 +597,9 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                     if detail_data["is_shop"]:
                         continue
 
-                    # Выбираем лучшее фото (преимущество у детального, либо берем с карточки)
                     final_image_url = detail_data["image_url"] or card_image_url
-
                     final_location = detail_data["location"] or location_card
-                    final_tags = generate_museum_tags(
-                        title, 
-                        detail_data["branch_tag"]
-                    )
+                    final_tags = generate_museum_tags(title, detail_data["branch_tag"])
 
                     events.append(
                         Event(
@@ -609,19 +644,22 @@ async def fetch_events(session: aiohttp.ClientSession) -> List[Event]:
 
 
 async def download_image(session: aiohttp.ClientSession, url: str) -> Optional[io.BytesIO]:
-    """Скачивание картинки с правильными заголовками."""
+    """Скачивание картинки с валидацией содержимого."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept": "image/avif,image/webp,image/apng,image/jpeg,image/png,image/*,*/*;q=0.8",
         "Referer": "https://tgliamz.ru/"
     }
     try:
         async with session.get(url, headers=headers, timeout=12) as resp:
             if resp.status == 200:
+                content_type = resp.headers.get("Content-Type", "").lower()
+                if "text/html" in content_type or "svg" in content_type:
+                    return None
+
                 data = await resp.read()
-                if len(data) > 500:
+                if len(data) > 2000:
                     file_stream = io.BytesIO(data)
-                    file_stream.name = "image.jpg"
                     return file_stream
     except Exception as e:
         logger.warning(f"Ошибка скачивания фото по адресу {url}: {e}")
@@ -671,9 +709,11 @@ async def main():
                 img_stream = await download_image(session, event.image_url)
                 if img_stream:
                     try:
+                        # Фикс белого прямоугольника: обертка в InputFile с расширением filename
+                        input_photo = InputFile(img_stream, filename="photo.jpg")
                         await bot.send_photo(
                             chat_id=channel_id,
-                            photo=img_stream,
+                            photo=input_photo,
                             caption=caption,
                             parse_mode=ParseMode.HTML,
                             reply_markup=reply_markup
@@ -681,19 +721,6 @@ async def main():
                         photo_sent = True
                     except Exception as e:
                         logger.warning(f"Ошибка отправки фото байтами [{event.title}]: {e}")
-
-                if not photo_sent:
-                    try:
-                        await bot.send_photo(
-                            chat_id=channel_id,
-                            photo=event.image_url,
-                            caption=caption,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=reply_markup
-                        )
-                        photo_sent = True
-                    except Exception as e:
-                        logger.warning(f"Ошибка отправки фото по ссылке [{event.title}]: {e}")
 
             if not photo_sent:
                 try:
