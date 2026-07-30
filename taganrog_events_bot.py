@@ -29,6 +29,7 @@ STRICT_SOUVENIR_WORDS = [
     "музейный магазин", "прейскурант цен на товары", "каталог сувениров"
 ]
 
+# Общий телефон музея, который НЕ нужно выводить повторно/вверху
 EXCLUDED_PHONES = ["383496", "38-34-96"]
 
 MONTH_MAP = {
@@ -189,13 +190,13 @@ def extract_all_phones(text: str, primary_phone: Optional[tuple] = None) -> List
     formatted_phones = []
     seen_digits = set()
 
-    # Если есть приоритетный телефон филиала — ставим его на 1-е место
+    # Если задан телефон филиала — выводим ТОЛЬКО его
     if primary_phone:
         p_disp, p_tel = primary_phone
-        p_digits = re.sub(r"\D", "", p_tel)
-        seen_digits.add(p_digits)
         formatted_phones.append(primary_phone)
+        return formatted_phones
 
+    # Иначе собираем остальные найденные телефоны, исключая общий справочный
     for raw in raw_phones:
         digits = re.sub(r"\D", "", raw)
         if not digits:
@@ -227,7 +228,6 @@ def extract_all_phones(text: str, primary_phone: Optional[tuple] = None) -> List
 
 
 def detect_event_type(soup: BeautifulSoup, title: str, full_text: str) -> str:
-    # 1. Поиск по селекторам сайта
     selectors = [
         ".category-title", ".subtitle", ".event-type", ".news-category",
         ".section-title", ".type", ".detail-type", ".theme-title"
@@ -237,7 +237,6 @@ def detect_event_type(soup: BeautifulSoup, title: str, full_text: str) -> str:
         if el and len(el.get_text(strip=True)) > 2:
             return el.get_text(strip=True)
 
-    # 2. Поиск по ключевым словам в тексте
     combined = (title + " " + full_text).lower()
     if "мастер-класс" in combined or "мастер класс" in combined:
         return "Мастер-класс"
@@ -310,7 +309,7 @@ def format_caption(event: Event) -> str:
 
     lines = []
 
-    # 1. Шапка (БЕЗ УПОМИНАНИЯ "Афиша выходного дня")
+    # 1. Шапка
     if event.category == Category.THEATRE_MONTH:
         lines.append("<b>ТАГАНРОГСКИЙ ТЕАТР ИМ. А.П. ЧЕХОВА</b>")
         lines.append("<i>Репертуар и анонс спектаклей</i>\n")
@@ -336,7 +335,6 @@ def format_caption(event: Event) -> str:
         else:
             lines.append(f"<b>Стоимость билета:</b> {prices} (в кассе музея)")
 
-    # Флаг обязательной записи
     if event.requires_booking:
         lines.append("<b>Предварительная запись обязательна!</b>")
 
@@ -453,29 +451,25 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str, 
                 soup = BeautifulSoup(html_text, "html.parser")
                 page_full_text = soup.get_text()
 
-                # Ищем блок основного контента статьи
                 main_content = soup.select_one(".news-detail, .detail_text, .content, .workarea") or soup
 
-                # 1. Точный поиск индивидуальной ссылки vmuzey.com внутри контента
                 for a_tag in main_content.find_all("a", href=True):
                     href = a_tag["href"].strip()
                     if "vmuzey.com/event/" in href:
                         data["buy_ticket_url"] = href
                         break
 
-                # 2. Определение типа программы
                 data["event_type"] = detect_event_type(soup, card_title, page_full_text)
 
-                # 3. Картинка
+                # Поиск изображений (включая атрибуты lazy-loading)
                 img_el = main_content.select_one("img")
-                if img_el and (img_el.get("src") or img_el.get("data-src")):
-                    src = img_el.get("src") or img_el.get("data-src")
-                    data["image_url"] = urljoin("https://tgliamz.ru", src)
+                if img_el:
+                    src = img_el.get("src") or img_el.get("data-src") or img_el.get("data-original")
+                    if src and not src.startswith("data:"):
+                        data["image_url"] = urljoin("https://tgliamz.ru", src)
 
-                # 4. Предварительная запись / Бронирование
                 data["requires_booking"] = check_requires_booking(page_full_text)
 
-                # 5. Филиал и его индивидуальный телефон
                 primary_phone = None
                 for branch in MUSEUM_BRANCHES:
                     if any(k in page_full_text.lower() for k in branch["keys"]):
@@ -485,10 +479,8 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str, 
                         primary_phone = branch.get("primary_phone")
                         break
 
-                # 6. Извлечение всех телефонов (с приоритетным номером на 1-м месте)
                 data["phones"] = extract_all_phones(page_full_text, primary_phone=primary_phone)
 
-                # 7. Дата, время, стоимость
                 date_match = re.search(r"((?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье)?,?\s*\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))", page_full_text, re.I)
                 if date_match:
                     data["date_str"] = date_match.group(1).capitalize()
@@ -555,9 +547,10 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                         continue
 
                     image_url = detail_data["image_url"]
-                    if not image_url and img_el and (img_el.get("src") or img_el.get("data-src")):
-                        src = img_el.get("src") or img_el.get("data-src")
-                        image_url = urljoin(base_url, src)
+                    if not image_url and img_el:
+                        src = img_el.get("src") or img_el.get("data-src") or img_el.get("data-original")
+                        if src and not src.startswith("data:"):
+                            image_url = urljoin(base_url, src)
 
                     final_location = detail_data["location"] or location_card
                     final_tags = generate_museum_tags(
@@ -607,6 +600,25 @@ async def fetch_events(session: aiohttp.ClientSession) -> List[Event]:
     return all_events
 
 
+async def download_image(session: aiohttp.ClientSession, url: str) -> Optional[io.BytesIO]:
+    """Надежное скачивание изображения с эмуляцией браузере."""
+    img_headers = {
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Referer": "https://tgliamz.ru/"
+    }
+    try:
+        async with session.get(url, headers=img_headers, timeout=12) as resp:
+            if resp.status == 200:
+                data = await resp.read()
+                if len(data) > 1000:  # Защита от пустых ответов
+                    file_stream = io.BytesIO(data)
+                    file_stream.name = "image.jpg"
+                    return file_stream
+    except Exception as e:
+        logger.warning(f"Не удалось скачать картинку {url}: {e}")
+    return None
+
+
 # ===================== ОСНОВНОЙ ЦИКЛ ОТПРАВКИ =====================
 async def main():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
@@ -647,23 +659,33 @@ async def main():
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
             if event.image_url:
-                try:
-                    async with session.get(event.image_url, timeout=10) as img_resp:
-                        if img_resp.status == 200:
-                            img_data = await img_resp.read()
-                            img_file = io.BytesIO(img_data)
-                            img_file.name = "image.jpg"
+                img_stream = await download_image(session, event.image_url)
+                if img_stream:
+                    try:
+                        await bot.send_photo(
+                            chat_id=channel_id,
+                            photo=img_stream,
+                            caption=caption,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=reply_markup
+                        )
+                        photo_sent = True
+                    except Exception as e:
+                        logger.warning(f"Ошибка отправки фото потоком [{event.title}]: {e}")
 
-                            await bot.send_photo(
-                                chat_id=channel_id,
-                                photo=img_file,
-                                caption=caption,
-                                parse_mode=ParseMode.HTML,
-                                reply_markup=reply_markup
-                            )
-                            photo_sent = True
-                except Exception as img_err:
-                    logger.warning(f"Не удалось загрузить фото для [{event.title}], отправляем текстом: {img_err}")
+                # Запасной вариант — отправка прямой ссылкой
+                if not photo_sent:
+                    try:
+                        await bot.send_photo(
+                            chat_id=channel_id,
+                            photo=event.image_url,
+                            caption=caption,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=reply_markup
+                        )
+                        photo_sent = True
+                    except Exception as e:
+                        logger.warning(f"Ошибка отправки фото ссылкой [{event.title}]: {e}")
 
             if not photo_sent:
                 try:
