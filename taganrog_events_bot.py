@@ -33,19 +33,19 @@ EXCLUDED_PHONES = ["383496", "38-34-96"]
 MUSEUM_BRANCHES = [
     {
         "keys": ["литературный музей", "литературно-музыкальн"],
-        "name": "Литературный музей А.П. Чехова",
+        "name": "Литературный музей\nА.П. Чехова",
         "address": "ул. Октябрьская, 9",
         "tag": "#ЛитературныйМузейЧехова"
     },
     {
         "keys": ["юрнкц", "южно-российский"],
-        "name": "ЮРНКЦ А.П. Чехова",
+        "name": "ЮРНКЦ\nА.П. Чехова",
         "address": "ул. Октябрьская, 9",
         "tag": "#ЮРНКЦЧехова"
     },
     {
         "keys": ["дворец алфераки", "историко-краеведческий"],
-        "name": "Историко-краеведческий музей (Дворец Алфераки)",
+        "name": "Историко-краеведческий музей\n(Дворец Алфераки)",
         "address": "ул. Фрунзе, 41",
         "tag": "#ДворецАлфераки"
     },
@@ -93,12 +93,14 @@ class Event:
     event_id: str
     category: Category
     title: str
+    event_type: str = ""
     date_str: str = ""
     time_str: str = ""
     location: str = ""
     address: str = ""
     description: str = ""
     prices: str = ""
+    requires_booking: bool = False
     phones: List[tuple] = field(default_factory=list)
     tickets_url: str = ""
     buy_ticket_url: str = ""
@@ -158,21 +160,19 @@ def extract_all_phones(text: str) -> List[tuple]:
         if any(ex in digits for ex in EXCLUDED_PHONES):
             continue
 
-        # Городские 6-значные номера Таганрога (8634)
+        # 6-значные городские номера (8634)
         if len(digits) == 6 and digits not in seen_digits:
             seen_digits.add(digits)
             display = f"8 (8634) {digits[:2]}-{digits[2:4]}-{digits[4:]}"
             tel = f"+78634{digits}"
             formatted_phones.append((display, tel))
-            
-        # 11-значные номера (мобильные и полные городские)
+
+        # 11-значные номера
         elif len(digits) == 11 and digits not in seen_digits:
             seen_digits.add(digits)
-            # Если мобильный (начинается с 79... или 89...)
             if digits[1] == '9':
                 display = f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
                 tel = f"+7{digits[1:]}"
-            # Если городской Таганрога с кодом 8634
             elif digits[1:5] == '8634':
                 display = f"8 (8634) {digits[5:7]}-{digits[7:9]}-{digits[9:]}"
                 tel = f"+7{digits[1:]}"
@@ -213,6 +213,7 @@ def generate_museum_tags(text: str, branch_tag: str) -> List[str]:
 # ===================== ФОРМАТИРОВАНИЕ СООБЩЕНИЙ =====================
 def format_caption(event: Event) -> str:
     title = html.escape(event.title.strip())
+    event_type = html.escape(event.event_type.strip())
     date_str = html.escape(event.date_str.strip())
     time_str = html.escape(event.time_str.strip())
     location = html.escape(event.location.strip())
@@ -227,7 +228,10 @@ def format_caption(event: Event) -> str:
         lines.append("<i>Репертуар и анонс спектаклей</i>\n")
     elif event.category == Category.MUSEUM:
         lines.append("<b>МУЗЕЙНАЯ АФИША ТАГАНРОГА</b>")
-        lines.append("<i>Таганрогский музей-заповедник</i>\n")
+        if event_type:
+            lines.append(f"<i>{event_type}</i>\n")
+        else:
+            lines.append("<i>Таганрогский музей-заповедник</i>\n")
 
     lines.append(f"<b>{title}</b>\n")
 
@@ -242,14 +246,16 @@ def format_caption(event: Event) -> str:
     if prices:
         lines.append(f"<b>Стоимость билета:</b> {prices}")
 
+    if event.requires_booking:
+        lines.append("<b>Бронирование мест обязательно</b>")
+
     if location:
         lines.append(f"\n{location}")
     if address:
         lines.append(f"{address}.")
 
-    # Вывод телефонов: каждый с новой строки
     if event.phones:
-        lines.append("\n📞 <b>Справки и запись:</b>")
+        lines.append("\n📞 <b>Справки по телефону:</b>")
         for disp, tel in event.phones:
             lines.append(f"<a href='tel:{tel}'>{disp}</a>")
 
@@ -305,10 +311,10 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
                                 title=title,
                                 date_str=date_str,
                                 time_str=time_str,
-                                location="Театр им. А.П. Чехова",
+                                location="Таганрогский театр\nим. А.П. Чехова",
                                 address="ул. Петровская, 90",
                                 prices=prices,
-                                phones=extract_all_phones("+7 (8634) 38-29-68"),
+                                phones=extract_all_phones("8 (8634) 38-29-68"),
                                 tickets_url=tickets_url,
                                 buy_ticket_url=tickets_url,
                                 image_url=image_url,
@@ -323,12 +329,14 @@ async def parse_chehov_theatre(session: aiohttp.ClientSession) -> List[Event]:
 
 async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) -> dict:
     data = {
+        "event_type": "",
         "description": "", 
         "date_str": "", 
         "time_str": "", 
         "location": "", 
         "address": "", 
         "prices": "", 
+        "requires_booking": False,
         "phones": [], 
         "branch_tag": "",
         "buy_ticket_url": "",
@@ -344,6 +352,12 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                 soup = BeautifulSoup(html_text, "html.parser")
 
+                # Тип программы (категория)
+                type_el = soup.select_one(".category-title, .subtitle, .event-type, .news-category, .section-title")
+                if type_el:
+                    data["event_type"] = type_el.get_text(strip=True)
+
+                # Поиск ссылки на покупку билета
                 for a_tag in soup.find_all("a", href=True):
                     href = a_tag["href"].strip()
                     link_text = a_tag.get_text(strip=True).lower()
@@ -358,12 +372,17 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                             data["buy_ticket_url"] = href
 
                 content_block = soup.select_one(".detail-text, .news-detail, .content-text, .detail_text, .workarea, .content")
-                page_full_text = soup.get_text()
-                data["phones"] = extract_all_phones(page_full_text)
-
+                
+                # Парсинг телефонов и бронирования строго из текста анонса
                 if content_block:
                     for s in content_block(["script", "style"]):
                         s.extract()
+
+                    content_text = content_block.get_text()
+                    data["phones"] = extract_all_phones(content_text)
+
+                    if any(phrase in content_text.lower() for phrase in ["бронирование мест обязательно", "предварительная запись обязательна", "запись по телефону"]):
+                        data["requires_booking"] = True
 
                     paragraphs = []
                     important_notes = []
@@ -373,11 +392,11 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                         if len(txt) < 15 or txt.lower().startswith("купить билет"):
                             continue
 
-                        if any(phrase in txt.lower() for phrase in ["предварительная запись", "количество мест ограничено", "приглашаются участники", "опыт не важен"]):
+                        if any(phrase in txt.lower() for phrase in ["предварительная запись", "количество мест ограничено", "приглашаются участники"]):
                             if txt not in important_notes:
                                 important_notes.append(html.escape(txt))
                         else:
-                            if txt not in paragraphs and not txt.startswith("Тел"):
+                            if txt not in paragraphs and not txt.startswith("Телефон"):
                                 paragraphs.append(html.escape(txt))
 
                     desc_parts = []
@@ -388,6 +407,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 
                     data["description"] = "\n\n".join(desc_parts)
 
+                page_full_text = soup.get_text()
                 text_to_check = page_full_text.lower()
                 for branch in MUSEUM_BRANCHES:
                     if any(k in text_to_check for k in branch["keys"]):
@@ -474,12 +494,14 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                             event_id=event_id,
                             category=Category.MUSEUM,
                             title=title,
+                            event_type=detail_data["event_type"],
                             date_str=detail_data["date_str"] or date_str,
                             time_str=detail_data["time_str"],
                             location=final_location,
                             address=detail_data["address"],
                             description=detail_data["description"],
                             prices=detail_data["prices"],
+                            requires_booking=detail_data["requires_booking"],
                             phones=detail_data["phones"],
                             tickets_url=tickets_url,
                             buy_ticket_url=detail_data["buy_ticket_url"],
@@ -540,7 +562,7 @@ async def main():
 
             reply_markup = None
             if event.buy_ticket_url and "vmuzey.com" in event.buy_ticket_url:
-                keyboard = [[InlineKeyboardButton("🎫 Купить билет (Пушкинская карта)", url=event.buy_ticket_url)]]
+                keyboard = [[InlineKeyboardButton("🎫 Купить билет", url=event.buy_ticket_url)]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
             if event.image_url:
