@@ -251,7 +251,7 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
 # ===================== ОСНОВНОЙ ТОЧКА ВХОДА =====================
 async def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
-    user_id_str = os.environ.get("TELEGRAM_USER_ID") or os.getenv("BOT_ID")
+    user_id_str = os.environ.get("TELEGRAM_USER_ID") or os.getenv("CHAT_ID")
 
     if not token or not user_id_str:
         logger.error("Ошибка: Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_USER_ID в переменных окружения.")
