@@ -149,7 +149,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                 
                 soup = BeautifulSoup(html_text, "html.parser")
                 
-                # Извлечение телефонов (без исключения общего номера)
+                # Извлечение телефонов (исключение общего номера)
                 phones = re.findall(r'(?:\+7|8)[\s\-]?\(?\d{3,4}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', html_text)
                 data["phones"] = list(set(phones))
                 
@@ -254,13 +254,13 @@ async def main():
     user_id_str = os.environ.get("TELEGRAM_USER_ID") or os.getenv("CHAT_ID")
 
     if not token or not user_id_str:
-        logger.error("Ошибка: Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_USER_ID в переменных окружения.")
+        logger.error("Ошибка: Не заданы BOT_TOKEN или CHAT_ID в переменных окружения.")
         return
 
     try:
         user_id = int(user_id_str)
     except ValueError:
-        logger.error("Ошибка: TELEGRAM_USER_ID должен быть числовым значениями.")
+        logger.error("Ошибка: CHAT_ID должен быть числовым значениями.")
         return
 
     init_db()
