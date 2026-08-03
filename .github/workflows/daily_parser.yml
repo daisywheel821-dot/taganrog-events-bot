@@ -25,8 +25,8 @@ jobs:
 
       - name: Run events bot script
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TELEGRAM_USER_ID: ${{ secrets.CHAT_ID }}
         run: python taganrog_events_bot.py
 
       - name: Commit and push DB changes
