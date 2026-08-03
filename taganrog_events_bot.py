@@ -110,17 +110,17 @@ def format_event_post(event: Event) -> str:
     lines.append(f"<b>{html.escape(event.title)}</b>\n")
     
     if event.date_str:
-        date_line = f"📅 <b>Дата:</b> {html.escape(event.date_str)}"
+        date_line = f" <b>Дата:</b> {html.escape(event.date_str)}"
         if event.time_str:
-            date_line += f" | ⏰ {html.escape(event.time_str)}"
+            date_line += f" |  {html.escape(event.time_str)}"
         lines.append(date_line)
         
     if event.location:
-        lines.append(f"📍 <b>Место:</b> {html.escape(event.location)}")
+        lines.append(f" <b>Место:</b> {html.escape(event.location)}")
     if event.address:
-        lines.append(f"🏛️ <b>Адрес:</b> {html.escape(event.address)}")
+        lines.append(f" <b>Адрес:</b> {html.escape(event.address)}")
     if event.prices:
-        lines.append(f"💰 <b>Билеты:</b> {html.escape(event.prices)}")
+        lines.append(f" <b>Билеты:</b> {html.escape(event.prices)}")
         
     if event.requires_booking:
         lines.append("\n⚠️ <b>Предварительная запись обязательна!</b>")
@@ -250,8 +250,8 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
 
 # ===================== ОСНОВНОЙ ТОЧКА ВХОДА =====================
 async def main():
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    user_id_str = os.environ.get("TELEGRAM_USER_ID")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+    user_id_str = os.environ.get("TELEGRAM_USER_ID") or os.getenv("BOT_ID")
 
     if not token or not user_id_str:
         logger.error("Ошибка: Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_USER_ID в переменных окружения.")
