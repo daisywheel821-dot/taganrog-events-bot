@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 # ===================== КОНФИГУРАЦИЯ И КОНСТАНТЫ =====================
 DB_PATH = "data/taganrog_events.db"
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+}
+
 STRICT_SOUVENIR_WORDS = [
     "сувенирная продукция", "купить сувенир", "в продаже сувениры", 
     "музейный магазин", "прейскурант цен на товары", "каталог сувениров"
@@ -173,7 +178,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
         "buy_ticket_url": "", "image_url": None, "is_shop": False
     }
     try:
-        async with session.get(detail_url, timeout=10) as resp:
+        async with session.get(detail_url, headers=HEADERS, timeout=10) as resp:
             if resp.status == 200:
                 html_text = await resp.text()
                 if is_souvenir_shop_item(html_text):
@@ -206,7 +211,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                         data["branch_tag"] = branch["tag"]
                         break
                 
-                # Билеты и дата (базовый парсинг блоков)
+                # Билеты и изображение
                 buy_btn = soup.find("a", href=re.compile(r'vmuzey|afisha|tickets', re.I))
                 if buy_btn and buy_btn.get("href"):
                     data["buy_ticket_url"] = buy_btn["href"]
@@ -238,7 +243,7 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
     url = "https://tgliamz.ru/calendar/"
     base_url = "https://tgliamz.ru"
     try:
-        async with session.get(url, timeout=12) as resp:
+        async with session.get(url, headers=HEADERS, timeout=12) as resp:
             if resp.status == 200:
                 html_text = await resp.text()
                 soup = BeautifulSoup(html_text, "html.parser")
@@ -300,21 +305,30 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     
     try:
+        photo_sent = False
         if event.image_url:
-            async with session.get(event.image_url, timeout=10) as resp:
-                if resp.status == 200:
-                    image_bytes = await resp.read()
-                    await bot.send_photo(
-                        chat_id=user_id,
-                        photo=io.BytesIO(image_bytes),
-                        caption=text,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=reply_markup
-                    )
-                else:
-                    await bot.send_message(chat_id=user_id, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-        else:
-            await bot.send_message(chat_id=user_id, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+            try:
+                async with session.get(event.image_url, headers=HEADERS, timeout=10) as resp:
+                    if resp.status == 200:
+                        image_bytes = await resp.read()
+                        await bot.send_photo(
+                            chat_id=user_id,
+                            photo=io.BytesIO(image_bytes),
+                            caption=text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=reply_markup
+                        )
+                        photo_sent = True
+            except Exception as img_err:
+                logger.warning(f"Не удалось загрузить фото для '{event.title}', отправляем текстом: {img_err}")
+
+        if not photo_sent:
+            await bot.send_message(
+                chat_id=user_id, 
+                text=text, 
+                parse_mode=ParseMode.HTML, 
+                reply_markup=reply_markup
+            )
             
         mark_event_sent(event.url)
         logger.info(f"Успешно отправлено событие: {event.title}")
@@ -323,7 +337,7 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
     except TelegramError as e:
         logger.error(f"Ошибка Telegram при отправке '{event.title}': {e}")
 
-# ===================== ОСНОВНОЙ ТОЧКА ВХОДА =====================
+# ===================== ОСНОВНАЯ ТОЧКА ВХОДА =====================
 async def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
     user_id_str = os.environ.get("TELEGRAM_USER_ID") or os.getenv("CHAT_ID")
