@@ -50,6 +50,7 @@ MONTH_MAP = {
     "мая": 5, "июня": 6, "июля": 7, "августа": 8,
     "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12
 }
+REVERSE_MONTH_MAP = {v: k for k, v in MONTH_MAP.items()}
 
 MUSEUM_BRANCHES = [
     {"keys": ["литературный музей", "литературно-музыкальн"], "name": "Литературный музей А.П. Чехова", "address": "ул. Октябрьская, 9", "tag": "#ЛитературныйМузей"},
@@ -297,15 +298,30 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                 if img_tag and img_tag.get("src"):
                     data["image_url"] = urljoin("https://tgliamz.ru", img_tag["src"])
                     
-                # Парсинг дат из текста для сортировки
-                date_match = re.search(r'(?i)(?:дата|когда):\s*(\d{1,2}\s+[а-я]+)', text_content)
-                if date_match:
-                    data["date_str"] = date_match.group(1).title()
+                # Дата и время указаны в свободном тексте БЕЗ меток "Дата:"/"Время:",
+                # например: "Суббота, 8 августа в 15.00" или "16 августа в 18.00".
+                # Сначала ищем связку дата+время в одном месте (так на сайте обычно
+                # оформлена ключевая строка события), при неудаче — только дату.
+                combo_match = re.search(
+                    r'(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+в\s+(\d{1,2})[.:](\d{2})',
+                    text_content, re.IGNORECASE
+                )
+                if combo_match:
+                    data["date_str"] = f"{combo_match.group(1)} {combo_match.group(2)}".title()
                     data["parsed_date"] = parse_event_date(data["date_str"])
-                    
-                time_match = re.search(r'(?i)(?:время|начало):\s*(\d{1,2}[:.-]\d{2})', text_content)
-                if time_match:
-                    data["time_str"] = time_match.group(1).replace('.', ':').replace('-', ':')
+                    data["time_str"] = f"{combo_match.group(3)}:{combo_match.group(4)}"
+                else:
+                    date_only_match = re.search(
+                        r'(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)',
+                        text_content, re.IGNORECASE
+                    )
+                    if date_only_match:
+                        data["date_str"] = f"{date_only_match.group(1)} {date_only_match.group(2)}".title()
+                        data["parsed_date"] = parse_event_date(data["date_str"])
+
+                    time_only_match = re.search(r'\bв\s*(\d{1,2})[.:](\d{2})\b', text_content)
+                    if time_only_match:
+                        data["time_str"] = f"{time_only_match.group(1)}:{time_only_match.group(2)}"
                     
                 price_match = re.search(r'(?i)(?:цена|стоимость|билет)[^0-9]*(\d{2,4})\s*(?:руб|р)', text_content)
                 if price_match:
@@ -356,21 +372,48 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
 
                     seen_urls.add(event_url)
 
+                    # Дата прямо из карточки в списке афиши (формат ДД.ММ.ГГГГ) —
+                    # надёжный источник, не зависящий от формулировок текста на
+                    # детальной странице. Используем её в приоритете для фильтрации.
+                    list_date = None
+                    list_date_match = re.search(r'\b(\d{2})\.(\d{2})\.(\d{4})\b', item.get_text())
+                    if list_date_match:
+                        try:
+                            list_date = date(
+                                int(list_date_match.group(3)),
+                                int(list_date_match.group(2)),
+                                int(list_date_match.group(1))
+                            )
+                        except ValueError:
+                            list_date = None
+
                     detail_data = await parse_tgliamz_detail(session, event_url)
                     
                     if detail_data.get("is_shop"):
                         continue
-                        
+
+                    # Итоговая дата события: приоритет — дата из списка афиши,
+                    # при её отсутствии — дата, найденная в тексте детальной страницы.
+                    final_parsed_date = list_date or detail_data.get("parsed_date")
+
                     # Отсеиваем прошедшие события
-                    if detail_data.get("parsed_date") and detail_data["parsed_date"] < date.today():
+                    if final_parsed_date and final_parsed_date < date.today():
                         continue
-                        
+
+                    # Текст даты для поста: берём из детальной страницы (там есть
+                    # человекочитаемая формулировка "8 августа"); если её не нашли,
+                    # но дата из списка есть — формируем строку из неё же.
+                    final_date_str = detail_data.get("date_str") or (
+                        f"{final_parsed_date.day} {REVERSE_MONTH_MAP.get(final_parsed_date.month, '')}"
+                        if final_parsed_date else ""
+                    )
+
                     event = Event(
                         title=title,
                         url=event_url,
                         event_type=detail_data.get("event_type", ""),
-                        date_str=detail_data.get("date_str", ""),
-                        parsed_date=detail_data.get("parsed_date"),
+                        date_str=final_date_str,
+                        parsed_date=final_parsed_date,
                         time_str=detail_data.get("time_str", ""),
                         location=detail_data.get("location", ""),
                         address=detail_data.get("address", ""),
