@@ -54,6 +54,7 @@ REVERSE_MONTH_MAP = {v: k for k, v in MONTH_MAP.items()}
 
 MUSEUM_BRANCHES = [
     {"keys": ["литературный музей", "литературно-музыкальн"], "name": "Литературный музей А.П. Чехова", "address": "ул. Октябрьская, 9", "tag": "#ЛитературныйМузей"},
+    {"keys": ["юрнкц", "южно-российский"], "name": "ЮРНКЦ А.П. Чехова", "address": "ул. Октябрьская, 9", "tag": "#ЮРНКЦЧехова"},
     {"keys": ["дворец алфераки", "историко-краеведческ"], "name": "Историко-краеведческий музей (Дворец Алфераки)", "address": "ул. Фрунзе, 41", "tag": "#ДворецАлфераки"},
     {"keys": ["домик чехова"], "name": "Музей «Домик Чехова»", "address": "ул. Чехова, 69", "tag": "#ДомикЧехова"},
     {"keys": ["лавка чеховых", "лавка чехова"], "name": "Музей «Лавка Чеховых»", "address": "ул. Александровская, 100", "tag": "#ЛавкаЧеховых"},
@@ -280,18 +281,33 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                 # Билеты: сначала ищем ссылку по паттерну ИНДИВИДУАЛЬНОЙ страницы
                 # события у vmuzey (например vmuzey.com/event/... или /product/...) —
                 # такая ссылка точно относится к конкретному мероприятию.
+                #
+                # Важно: ссылки на сайте встречаются и с полным протоколом
+                # ("https://vmuzey.com/..."), и в protocol-relative виде
+                # ("//vmuzey.com/..."). Достраиваем протокол через urljoin и
+                # сравниваем БЕЗ схемы, иначе общая ссылка в укороченном виде
+                # проходит проверку как "индивидуальная" и ломает кнопку в Telegram
+                # (ошибка "url host is empty").
+                def _strip_scheme(u: str) -> str:
+                    return re.sub(r'^https?:', '', u).rstrip('/')
+
+                generic_normalized = _strip_scheme(GENERIC_TICKET_URL)
+
                 individual_link = soup.find("a", href=re.compile(r'vmuzey\.com/(event|product)/', re.I))
                 if individual_link and individual_link.get("href"):
-                    data["buy_ticket_url"] = individual_link["href"].strip()
+                    data["buy_ticket_url"] = urljoin("https://tgliamz.ru", individual_link["href"].strip())
                 else:
                     # Иначе берём любую ссылку из блока, НЕ совпадающую с общей
                     # ссылкой "Купить билет" из шапки/футера сайта (она есть на
                     # каждой странице и не является индивидуальной).
                     buy_candidates = soup.find_all("a", href=re.compile(r'vmuzey|afisha|tickets', re.I))
                     for candidate in buy_candidates:
-                        href = (candidate.get("href") or "").strip()
-                        if href and href.rstrip("/") != GENERIC_TICKET_URL.rstrip("/"):
-                            data["buy_ticket_url"] = href
+                        raw_href = (candidate.get("href") or "").strip()
+                        if not raw_href:
+                            continue
+                        full_href = urljoin("https://tgliamz.ru", raw_href)
+                        if _strip_scheme(full_href) != generic_normalized:
+                            data["buy_ticket_url"] = full_href
                             break
 
                 img_tag = soup.find("img", src=re.compile(r'/upload/'))
