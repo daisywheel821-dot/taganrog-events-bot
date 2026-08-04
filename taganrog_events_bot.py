@@ -157,41 +157,56 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
 async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
     events = []
     url = "https://tgliamz.ru/calendar/"
+    base_url = "https://tgliamz.ru"
     try:
         async with session.get(url, timeout=12) as resp:
             if resp.status == 200:
                 html_text = await resp.text()
                 soup = BeautifulSoup(html_text, "html.parser")
                 
-                # Поиск афишных блоков
                 items = soup.find_all("div", class_=re.compile(r'event|calendar-item|afisha', re.I))
+                logger.info(f"👉 ЭТАП 1: Найдено блоков афиши на странице: {len(items)}")
+                
                 for item in items:
                     link = item.find("a", href=True)
                     if not link:
                         continue
-                    event_url = urljoin("https://tgliamz.ru", link["href"])
+                    
+                    event_url = urljoin(base_url, link["href"])
                     title = link.get_text(strip=True)
                     
-                    # УДАЛЕНА ПРОВЕРКА НА ДУБЛИКАТЫ (is_event_sent)
                     if not title:
                         continue
+                        
+                    logger.info(f"🔎 Проверяем: {title}")
                     
                     detail_data = await parse_tgliamz_detail(session, event_url)
                     if detail_data.get("is_shop"):
+                        logger.info(f"   ❌ Отклонено: это сувенирная продукция")
                         continue
                         
                     event = Event(
+                        event_id=event_url,
+                        category=Category.MUSEUM,
                         title=title,
-                        url=event_url,
-                        image_url=detail_data.get("image_url"),
-                        buy_ticket_url=detail_data.get("buy_ticket_url"),
-                        phones=detail_data.get("phones", [])
+                        event_type=detail_data.get("event_type", ""),
+                        date_str=detail_data.get("date_str", ""),
+                        time_str=detail_data.get("time_str", ""),
+                        location=detail_data.get("location", ""),
+                        address=detail_data.get("address", ""),
+                        prices=detail_data.get("prices", ""),
+                        requires_booking=detail_data.get("requires_booking", False),
+                        phones=detail_data.get("phones", []),
+                        buy_ticket_url=detail_data.get("buy_ticket_url", ""),
+                        image_url=detail_data.get("image_url")
                     )
                     events.append(event)
+                    logger.info(f"   ✅ Успешно добавлено в список")
     except Exception as e:
         logger.error(f"Ошибка при парсинге календаря TGLIAMZ: {e}")
+        
+    logger.info(f"👉 ЭТАП 2: Итого собрано событий с сайта: {len(events)}")
     return events
-
 # ===================== ОТПРАВКА В TELEGRAM =====================
 async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: aiohttp.ClientSession):
     text = format_event_post(event)
