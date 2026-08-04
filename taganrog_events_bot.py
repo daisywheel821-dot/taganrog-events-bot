@@ -7,9 +7,8 @@ import io
 import re
 from datetime import datetime, date
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import List, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 import aiohttp
 from bs4 import BeautifulSoup
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -31,6 +30,8 @@ STRICT_SOUVENIR_WORDS = [
     "музейный магазин", "прейскурант цен на товары", "каталог сувениров"
 ]
 
+EXCLUDED_PHONE_DIGITS = "8634610013"
+
 MONTH_MAP = {
     "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
     "мая": 5, "июня": 6, "июля": 7, "августа": 8,
@@ -38,13 +39,13 @@ MONTH_MAP = {
 }
 
 MUSEUM_BRANCHES = [
-    {"keys": ["литературный музей", "литературно-музыкальн"], "tag": "#ЛитературныйМузей"},
-    {"keys": ["дворец алфераки", "историко-краеведческ"], "tag": "#ДворецАлфераки"},
-    {"keys": ["домик чехова"], "tag": "#ДомикЧехова"},
-    {"keys": ["лавка чеховых"], "tag": "#ЛавкаЧеховых"},
-    {"keys": ["музей василенко"], "tag": "#МузейВасиленко"},
-    {"keys": ["музей дурова"], "tag": "#МузейДурова"},
-    {"keys": ["градостроительства"], "tag": "#МузейГрадостроительства"}
+    {"keys": ["литературный музей", "литературно-музыкальн"], "name": "Литературный музей А.П. Чехова", "address": "ул. Октябрьская, 9", "tag": "#ЛитературныйМузей"},
+    {"keys": ["дворец алфераки", "историко-краеведческ"], "name": "Историко-краеведческий музей (Дворец Алфераки)", "address": "ул. Фрунзе, 41", "tag": "#ДворецАлфераки"},
+    {"keys": ["домик чехова"], "name": "Музей «Домик Чехова»", "address": "ул. Чехова, 69", "tag": "#ДомикЧехова"},
+    {"keys": ["лавка чеховых", "лавка чехова"], "name": "Музей «Лавка Чеховых»", "address": "ул. Александровская, 100", "tag": "#ЛавкаЧеховых"},
+    {"keys": ["музей василенко", "василенко"], "name": "Музей И.Д. Василенко", "address": "ул. Чехова, 88", "tag": "#МузейВасиленко"},
+    {"keys": ["музей дурова", "дурова"], "name": "Музей А.А. Дурова", "address": "ул. А. Глушко, 44", "tag": "#МузейДурова"},
+    {"keys": ["градостроительства"], "name": "Музей градостроительства и быта", "address": "ул. Фрунзе, 80", "tag": "#МузейГрадостроительства"}
 ]
 
 @dataclass
@@ -65,8 +66,6 @@ class Event:
     image_url: Optional[str] = None
 
 # ===================== БАЗА ДАННЫХ SQLite =====================
-# Оставляем инициализацию, чтобы GitHub Actions не падал при git commit, 
-# но больше не используем её для блокировки отправки.
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -80,41 +79,88 @@ def init_db():
     conn.commit()
     conn.close()
 
+def is_event_sent(url: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM sent_events WHERE url = ?", (url,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+def mark_event_sent(url: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO sent_events (url) VALUES (?)", (url,))
+    conn.commit()
+    conn.close()
+
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
 def is_souvenir_shop_item(html_text: str) -> bool:
     text_lower = html_text.lower()
-    for word in STRICT_SOUVENIR_WORDS:
-        if word in text_lower:
-            return True
-    return False
+    return any(word in text_lower for word in STRICT_SOUVENIR_WORDS)
+
+def parse_event_date(date_text: str) -> Optional[date]:
+    if not date_text:
+        return None
+    try:
+        match = re.search(r'(\d{1,2})\s+([а-яА-Я]+)', date_text.lower())
+        if match:
+            day = int(match.group(1))
+            month_str = match.group(2)
+            month = MONTH_MAP.get(month_str)
+            if month:
+                current_year = date.today().year
+                event_date = date(current_year, month, day)
+                if event_date < date.today() and date.today().month == 12 and month == 1:
+                    event_date = date(current_year + 1, month, day)
+                return event_date
+    except Exception as e:
+        logger.warning(f"Не удалось распарсить дату '{date_text}': {e}")
+    return None
+
+def extract_targeted_phones(text: str) -> List[str]:
+    raw_phones = re.findall(r'(?:\+?7|8)?[\s(-]*\d{3,4}[\s)-]*\d{2,3}[\s-]*\d{2}[\s-]*\d{2}', text)
+    valid_phones = []
+    for p in raw_phones:
+        clean_p = re.sub(r'\D', '', p)
+        if len(clean_p) >= 10 and EXCLUDED_PHONE_DIGITS not in clean_p:
+            valid_phones.append(p.strip())
+    return list(set(valid_phones))
 
 def format_event_post(event: Event) -> str:
     lines = []
+    lines.append("<b>МУЗЕЙНАЯ АФИША ТАГАНРОГА</b>")
     
-    if event.branch_tag:
-        lines.append(f"<b>{html.escape(event.branch_tag)}</b>\n")
+    if event.event_type:
+        lines.append(f"<i>{html.escape(event.event_type)}</i>")
     
     lines.append(f"<b>{html.escape(event.title)}</b>\n")
     
     if event.date_str:
-        date_line = f" <b>Дата:</b> {html.escape(event.date_str)}"
-        if event.time_str:
-            date_line += f" |  {html.escape(event.time_str)}"
-        lines.append(date_line)
-        
-    if event.location:
-        lines.append(f" <b>Место:</b> {html.escape(event.location)}")
-    if event.address:
-        lines.append(f" <b>Адрес:</b> {html.escape(event.address)}")
+        lines.append(f"Дата: {html.escape(event.date_str)}")
+    if event.time_str:
+        lines.append(f"Время: {html.escape(event.time_str)}")
     if event.prices:
-        lines.append(f" <b>Билеты:</b> {html.escape(event.prices)}")
+        lines.append(f"Стоимость билета: {html.escape(event.prices)}\n")
         
-    if event.requires_booking:
-        lines.append("\n⚠️ <b>Предварительная запись обязательна!</b>")
+    if event.requires_booking or (event.event_type and "Мастер-класс" in event.event_type):
+        lines.append("<b><i>Предварительная запись обязательна!</i></b>")
+        if event.phones:
+            phones_str = ", ".join([html.escape(p) for p in event.phones])
+            lines.append(f"Телефон для записи: {phones_str}\n")
+        else:
+            lines.append("")
+    
+    if event.location:
+        lines.append(f"{html.escape(event.location)}")
+    if event.address:
+        lines.append(f"Адрес: {html.escape(event.address)}\n")
         
-    if event.phones:
-        phones_str = ", ".join([html.escape(p) for p in event.phones])
-        lines.append(f"📞 <b>Запись / Справки:</b> {phones_str}")
+    tags = []
+    if event.branch_tag:
+        tags.append(html.escape(event.branch_tag))
+    tags.extend(["#Таганрог", "#АфишаТаганрог"])
+    lines.append(" ".join(tags))
         
     return "\n".join(lines)
 
@@ -136,20 +182,53 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                 
                 soup = BeautifulSoup(html_text, "html.parser")
                 
-                # Извлечение телефонов (включая все номера)
-                phones = re.findall(r'(?:\+7|8)[\s\-]?\(?\d{3,4}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', html_text)
-                data["phones"] = list(set(phones))
+                # Типизация
+                text_content = soup.get_text(separator=" ").lower()
+                if "мастер-класс" in text_content or "мастер класс" in text_content:
+                    data["event_type"] = "Мастер-класс"
+                elif "литературно-музыкальн" in text_content or "джаз" in text_content:
+                    data["event_type"] = "Литературно-музыкальная программа"
+                elif "экскурси" in text_content:
+                    data["event_type"] = "Экскурсия"
+                elif "выставк" in text_content:
+                    data["event_type"] = "Выставка"
                 
-                # Поиск ссылки на покупку билета
+                # Бронь и телефоны
+                if "предварительная запись" in text_content or "запись по телефону" in text_content:
+                    data["requires_booking"] = True
+                data["phones"] = extract_targeted_phones(html_text)
+                
+                # Поиск филиала
+                for branch in MUSEUM_BRANCHES:
+                    if any(key in text_content for key in branch["keys"]):
+                        data["location"] = branch["name"]
+                        data["address"] = branch["address"]
+                        data["branch_tag"] = branch["tag"]
+                        break
+                
+                # Билеты и дата (базовый парсинг блоков)
                 buy_btn = soup.find("a", href=re.compile(r'vmuzey|afisha|tickets', re.I))
                 if buy_btn and buy_btn.get("href"):
                     data["buy_ticket_url"] = buy_btn["href"]
                     
-                # Картинка события
                 img_tag = soup.find("img", src=re.compile(r'/upload/'))
                 if img_tag and img_tag.get("src"):
                     data["image_url"] = urljoin("https://tgliamz.ru", img_tag["src"])
                     
+                # Парсинг дат из текста для сортировки
+                date_match = re.search(r'(?i)(?:дата|когда):\s*(\d{1,2}\s+[а-я]+)', text_content)
+                if date_match:
+                    data["date_str"] = date_match.group(1).title()
+                    data["parsed_date"] = parse_event_date(data["date_str"])
+                    
+                time_match = re.search(r'(?i)(?:время|начало):\s*(\d{1,2}[:.-]\d{2})', text_content)
+                if time_match:
+                    data["time_str"] = time_match.group(1).replace('.', ':').replace('-', ':')
+                    
+                price_match = re.search(r'(?i)(?:цена|стоимость|билет)[^0-9]*(\d{2,4})\s*(?:руб|р)', text_content)
+                if price_match:
+                    data["prices"] = f"{price_match.group(1)} руб. (в кассе музея)"
+
     except Exception as e:
         logger.error(f"Ошибка при парсинге деталей {detail_url}: {e}")
     return data
@@ -164,62 +243,60 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                 html_text = await resp.text()
                 soup = BeautifulSoup(html_text, "html.parser")
                 
-                # Ищем блоки с афишами (добавил news-item на случай изменений)
                 items = soup.find_all("div", class_=re.compile(r'event|calendar-item|afisha|news-item', re.I))
-                logger.info(f"👉 ЭТАП 1: Найдено блоков афиши на странице: {len(items)}")
+                logger.info(f"Найдено блоков афиши на странице: {len(items)}")
                 
                 for item in items:
                     title = ""
                     event_url = ""
                     
-                    # Перебираем ВСЕ ссылки в блоке, чтобы пропустить пустые картинки и найти текст
                     for a_tag in item.find_all("a", href=True):
                         text = a_tag.get_text(strip=True)
-                        if text:  # Как только нашли ссылку с текстом - забираем!
+                        if text: 
                             title = text
                             event_url = urljoin(base_url, a_tag["href"])
                             break
                             
-                    if not title:
+                    if not title or is_event_sent(event_url):
                         continue
                         
-                    logger.info(f"🔎 Проверяем: {title}")
-                    
                     detail_data = await parse_tgliamz_detail(session, event_url)
+                    
                     if detail_data.get("is_shop"):
-                        logger.info(f"   ❌ Отклонено: это сувенирная продукция")
+                        continue
+                        
+                    # Отсеиваем прошедшие события
+                    if detail_data.get("parsed_date") and detail_data["parsed_date"] < date.today():
                         continue
                         
                     event = Event(
-                        event_id=event_url,
-                        category=Category.MUSEUM,
                         title=title,
+                        url=event_url,
                         event_type=detail_data.get("event_type", ""),
                         date_str=detail_data.get("date_str", ""),
+                        parsed_date=detail_data.get("parsed_date"),
                         time_str=detail_data.get("time_str", ""),
                         location=detail_data.get("location", ""),
                         address=detail_data.get("address", ""),
                         prices=detail_data.get("prices", ""),
                         requires_booking=detail_data.get("requires_booking", False),
                         phones=detail_data.get("phones", []),
+                        branch_tag=detail_data.get("branch_tag", ""),
                         buy_ticket_url=detail_data.get("buy_ticket_url", ""),
                         image_url=detail_data.get("image_url")
                     )
                     events.append(event)
-                    logger.info(f"   ✅ Успешно добавлено в список")
     except Exception as e:
         logger.error(f"Ошибка при парсинге календаря TGLIAMZ: {e}")
-        
-    logger.info(f"👉 ЭТАП 2: Итого собрано событий с сайта: {len(events)}")
     return events
+
 # ===================== ОТПРАВКА В TELEGRAM =====================
 async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: aiohttp.ClientSession):
     text = format_event_post(event)
     
     keyboard = []
     if event.buy_ticket_url:
-        keyboard.append([InlineKeyboardButton("🎟️ Купить билет", url=event.buy_ticket_url)])
-    keyboard.append([InlineKeyboardButton("🔗 Источник события", url=event.url)])
+        keyboard.append([InlineKeyboardButton("Купить билет", url=event.buy_ticket_url)])
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     
     try:
@@ -235,23 +312,13 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
                         reply_markup=reply_markup
                     )
                 else:
-                    await bot.send_message(
-                        chat_id=user_id,
-                        text=text,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=reply_markup
-                    )
+                    await bot.send_message(chat_id=user_id, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
         else:
-            await bot.send_message(
-                chat_id=user_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup
-            )
+            await bot.send_message(chat_id=user_id, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
             
-        # Запись в базу убрана — бот больше не блокирует повторную отправку
+        mark_event_sent(event.url)
         logger.info(f"Успешно отправлено событие: {event.title}")
-        await asyncio.sleep(1.5) # Пауза между сообщениями
+        await asyncio.sleep(1.5)
         
     except TelegramError as e:
         logger.error(f"Ошибка Telegram при отправке '{event.title}': {e}")
@@ -262,13 +329,13 @@ async def main():
     user_id_str = os.environ.get("TELEGRAM_USER_ID") or os.getenv("CHAT_ID")
 
     if not token or not user_id_str:
-        logger.error("Ошибка: Не заданы BOT_TOKEN или CHAT_ID в переменных окружения.")
+        logger.error("Ошибка: Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_USER_ID в переменных окружения.")
         return
 
     try:
         user_id = int(user_id_str)
     except ValueError:
-        logger.error("Ошибка: CHAT_ID должен быть числовым значениями.")
+        logger.error("Ошибка: TELEGRAM_USER_ID должен быть числовым значением.")
         return
 
     init_db()
@@ -277,6 +344,10 @@ async def main():
     async with aiohttp.ClientSession() as session:
         logger.info("Начинаем сбор событий...")
         events = await parse_tgliamz_museums(session)
+        
+        # Строгая хронологическая сортировка (от ранних к поздним)
+        events.sort(key=lambda x: (x.parsed_date or date.max, x.time_str))
+        
         logger.info(f"Найдено событий для отправки: {len(events)}")
 
         for event in events:
