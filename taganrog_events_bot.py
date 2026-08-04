@@ -164,17 +164,22 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                 html_text = await resp.text()
                 soup = BeautifulSoup(html_text, "html.parser")
                 
-                items = soup.find_all("div", class_=re.compile(r'event|calendar-item|afisha', re.I))
+                # Ищем блоки с афишами (добавил news-item на случай изменений)
+                items = soup.find_all("div", class_=re.compile(r'event|calendar-item|afisha|news-item', re.I))
                 logger.info(f"👉 ЭТАП 1: Найдено блоков афиши на странице: {len(items)}")
                 
                 for item in items:
-                    link = item.find("a", href=True)
-                    if not link:
-                        continue
+                    title = ""
+                    event_url = ""
                     
-                    event_url = urljoin(base_url, link["href"])
-                    title = link.get_text(strip=True)
-                    
+                    # Перебираем ВСЕ ссылки в блоке, чтобы пропустить пустые картинки и найти текст
+                    for a_tag in item.find_all("a", href=True):
+                        text = a_tag.get_text(strip=True)
+                        if text:  # Как только нашли ссылку с текстом - забираем!
+                            title = text
+                            event_url = urljoin(base_url, a_tag["href"])
+                            break
+                            
                     if not title:
                         continue
                         
