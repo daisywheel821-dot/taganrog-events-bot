@@ -346,86 +346,98 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                 logger.info(f"Найдено блоков афиши на странице: {len(items)}")
                 
                 for item in items:
-                    title = ""
-                    event_url = ""
-                    
-                    for a_tag in item.find_all("a", href=True):
-                        text = a_tag.get_text(strip=True)
-                        if text: 
-                            title = text
-                            event_url = urljoin(base_url, a_tag["href"])
-                            break
-                            
-                    if not title or is_event_sent(event_url):
+                    try:
+                        title = ""
+                        event_url = ""
+                        
+                        for a_tag in item.find_all("a", href=True):
+                            text = a_tag.get_text(strip=True)
+                            if text: 
+                                title = text
+                                event_url = urljoin(base_url, a_tag["href"])
+                                break
+                                
+                        if not title:
+                            continue
+                        if is_event_sent(event_url):
+                            logger.info(f"Пропуск (уже было отправлено ранее): {title} — {event_url}")
+                            continue
+
+                        # Пропускаем дубли одного и того же события внутри текущего прогона
+                        # (возникают из-за вложенных div-блоков с похожими классами)
+                        if event_url in seen_urls:
+                            logger.info(f"Пропуск (дубль в текущем прогоне): {title}")
+                            continue
+
+                        # Пропускаем сводный модуль "Афиша выходного дня" — это не
+                        # отдельное событие, а дайджест-баннер, который сайт всегда
+                        # ставит первым в списке.
+                        if any(excluded in title.lower() for excluded in EXCLUDED_CARD_TITLES):
+                            logger.info(f"Пропуск (исключённая карточка-модуль): {title}")
+                            continue
+
+                        seen_urls.add(event_url)
+
+                        # Дата прямо из карточки в списке афиши (формат ДД.ММ.ГГГГ) —
+                        # надёжный источник, не зависящий от формулировок текста на
+                        # детальной странице. Используем её в приоритете для фильтрации.
+                        list_date = None
+                        list_date_match = re.search(r'\b(\d{2})\.(\d{2})\.(\d{4})\b', item.get_text())
+                        if list_date_match:
+                            try:
+                                list_date = date(
+                                    int(list_date_match.group(3)),
+                                    int(list_date_match.group(2)),
+                                    int(list_date_match.group(1))
+                                )
+                            except ValueError:
+                                list_date = None
+
+                        detail_data = await parse_tgliamz_detail(session, event_url)
+                        
+                        if detail_data.get("is_shop"):
+                            logger.info(f"Пропуск (страница сувенирной продукции): {title}")
+                            continue
+
+                        # Итоговая дата события: приоритет — дата из списка афиши,
+                        # при её отсутствии — дата, найденная в тексте детальной страницы.
+                        final_parsed_date = list_date or detail_data.get("parsed_date")
+
+                        # Отсеиваем прошедшие события
+                        if final_parsed_date and final_parsed_date < date.today():
+                            logger.info(f"Пропуск (прошедшая дата {final_parsed_date}): {title}")
+                            continue
+
+                        # Текст даты для поста: берём из детальной страницы (там есть
+                        # человекочитаемая формулировка "8 августа"); если её не нашли,
+                        # но дата из списка есть — формируем строку из неё же.
+                        final_date_str = detail_data.get("date_str") or (
+                            f"{final_parsed_date.day} {REVERSE_MONTH_MAP.get(final_parsed_date.month, '')}"
+                            if final_parsed_date else ""
+                        )
+
+                        event = Event(
+                            title=title,
+                            url=event_url,
+                            event_type=detail_data.get("event_type", ""),
+                            date_str=final_date_str,
+                            parsed_date=final_parsed_date,
+                            time_str=detail_data.get("time_str", ""),
+                            location=detail_data.get("location", ""),
+                            address=detail_data.get("address", ""),
+                            prices=detail_data.get("prices", ""),
+                            requires_booking=detail_data.get("requires_booking", False),
+                            phones=detail_data.get("phones", []),
+                            branch_tag=detail_data.get("branch_tag", ""),
+                            hashtags=detail_data.get("hashtags", []),
+                            buy_ticket_url=detail_data.get("buy_ticket_url", ""),
+                            image_url=detail_data.get("image_url")
+                        )
+                        events.append(event)
+                        logger.info(f"Событие добавлено к отправке: {title} ({final_parsed_date})")
+                    except Exception as item_err:
+                        logger.error(f"Ошибка при обработке карточки '{title or event_url}': {item_err}")
                         continue
-
-                    # Пропускаем дубли одного и того же события внутри текущего прогона
-                    # (возникают из-за вложенных div-блоков с похожими классами)
-                    if event_url in seen_urls:
-                        continue
-
-                    # Пропускаем сводный модуль "Афиша выходного дня" — это не
-                    # отдельное событие, а дайджест-баннер, который сайт всегда
-                    # ставит первым в списке.
-                    if any(excluded in title.lower() for excluded in EXCLUDED_CARD_TITLES):
-                        continue
-
-                    seen_urls.add(event_url)
-
-                    # Дата прямо из карточки в списке афиши (формат ДД.ММ.ГГГГ) —
-                    # надёжный источник, не зависящий от формулировок текста на
-                    # детальной странице. Используем её в приоритете для фильтрации.
-                    list_date = None
-                    list_date_match = re.search(r'\b(\d{2})\.(\d{2})\.(\d{4})\b', item.get_text())
-                    if list_date_match:
-                        try:
-                            list_date = date(
-                                int(list_date_match.group(3)),
-                                int(list_date_match.group(2)),
-                                int(list_date_match.group(1))
-                            )
-                        except ValueError:
-                            list_date = None
-
-                    detail_data = await parse_tgliamz_detail(session, event_url)
-                    
-                    if detail_data.get("is_shop"):
-                        continue
-
-                    # Итоговая дата события: приоритет — дата из списка афиши,
-                    # при её отсутствии — дата, найденная в тексте детальной страницы.
-                    final_parsed_date = list_date or detail_data.get("parsed_date")
-
-                    # Отсеиваем прошедшие события
-                    if final_parsed_date and final_parsed_date < date.today():
-                        continue
-
-                    # Текст даты для поста: берём из детальной страницы (там есть
-                    # человекочитаемая формулировка "8 августа"); если её не нашли,
-                    # но дата из списка есть — формируем строку из неё же.
-                    final_date_str = detail_data.get("date_str") or (
-                        f"{final_parsed_date.day} {REVERSE_MONTH_MAP.get(final_parsed_date.month, '')}"
-                        if final_parsed_date else ""
-                    )
-
-                    event = Event(
-                        title=title,
-                        url=event_url,
-                        event_type=detail_data.get("event_type", ""),
-                        date_str=final_date_str,
-                        parsed_date=final_parsed_date,
-                        time_str=detail_data.get("time_str", ""),
-                        location=detail_data.get("location", ""),
-                        address=detail_data.get("address", ""),
-                        prices=detail_data.get("prices", ""),
-                        requires_booking=detail_data.get("requires_booking", False),
-                        phones=detail_data.get("phones", []),
-                        branch_tag=detail_data.get("branch_tag", ""),
-                        hashtags=detail_data.get("hashtags", []),
-                        buy_ticket_url=detail_data.get("buy_ticket_url", ""),
-                        image_url=detail_data.get("image_url")
-                    )
-                    events.append(event)
     except Exception as e:
         logger.error(f"Ошибка при парсинге календаря TGLIAMZ: {e}")
     return events
