@@ -65,6 +65,8 @@ class Event:
     image_url: Optional[str] = None
 
 # ===================== БАЗА ДАННЫХ SQLite =====================
+# Оставляем инициализацию, чтобы GitHub Actions не падал при git commit, 
+# но больше не используем её для блокировки отправки.
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -75,21 +77,6 @@ def init_db():
             sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    conn.commit()
-    conn.close()
-
-def is_event_sent(url: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM sent_events WHERE url = ?", (url,))
-    result = cursor.fetchone()
-    conn.close()
-    return result is not None
-
-def mark_event_sent(url: str):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO sent_events (url) VALUES (?)", (url,))
     conn.commit()
     conn.close()
 
@@ -149,7 +136,7 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                 
                 soup = BeautifulSoup(html_text, "html.parser")
                 
-                # Извлечение телефонов (исключение общего номера)
+                # Извлечение телефонов (включая все номера)
                 phones = re.findall(r'(?:\+7|8)[\s\-]?\(?\d{3,4}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', html_text)
                 data["phones"] = list(set(phones))
                 
@@ -185,7 +172,8 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                     event_url = urljoin("https://tgliamz.ru", link["href"])
                     title = link.get_text(strip=True)
                     
-                    if not title or is_event_sent(event_url):
+                    # УДАЛЕНА ПРОВЕРКА НА ДУБЛИКАТЫ (is_event_sent)
+                    if not title:
                         continue
                     
                     detail_data = await parse_tgliamz_detail(session, event_url)
@@ -241,7 +229,7 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
                 reply_markup=reply_markup
             )
             
-        mark_event_sent(event.url)
+        # Запись в базу убрана — бот больше не блокирует повторную отправку
         logger.info(f"Успешно отправлено событие: {event.title}")
         await asyncio.sleep(1.5) # Пауза между сообщениями
         
@@ -269,7 +257,7 @@ async def main():
     async with aiohttp.ClientSession() as session:
         logger.info("Начинаем сбор событий...")
         events = await parse_tgliamz_museums(session)
-        logger.info(f"Найдено новых событий: {len(events)}")
+        logger.info(f"Найдено событий для отправки: {len(events)}")
 
         for event in events:
             await send_event_to_telegram(bot, user_id, event, session)
