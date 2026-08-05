@@ -204,8 +204,10 @@ def format_event_post(event: Event) -> str:
     if event.requires_booking or (event.event_type and "Мастер-класс" in event.event_type):
         lines.append("<b><i>Предварительная запись обязательна!</i></b>")
         if event.phones:
-            phones_str = ", ".join([html.escape(p) for p in event.phones])
-            lines.append(f"Телефон для записи: {phones_str}\n")
+            lines.append("Телефон для записи:")
+            for p in event.phones:
+                lines.append(html.escape(p))
+            lines.append("")
         else:
             lines.append("")
     
@@ -252,15 +254,32 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                 raw_text = soup.get_text(separator=" ")
                 text_content = raw_text.lower()
 
-                # Типизация
-                if "мастер-класс" in text_content or "мастер класс" in text_content:
+                # Тип события: берём из вступительной фразы страницы
+                # ("...приглашает N месяца на ЧТО-ТО...") — сайт всегда называет
+                # тип события напрямую в ней. НЕ ищем тип по всему тексту страницы:
+                # в меню сайта на КАЖДОЙ странице есть постоянные пункты
+                # "ЭКСКУРСИИ" и "ВЫСТАВКИ", которые иначе ложно совпадают с любым
+                # событием, не попавшим в более ранние категории.
+                intro_match = re.search(
+                    r'приглаша\S*\s+\d{1,2}\s+[а-яё]+\s+на\s+([^.,«]{3,80})',
+                    text_content, re.IGNORECASE
+                )
+                type_source = intro_match.group(1) if intro_match else ""
+
+                if "мастер-класс" in type_source or "мастер класс" in type_source:
                     data["event_type"] = "Мастер-класс"
-                elif "литературно-музыкальн" in text_content or "джаз" in text_content:
+                elif "литературно-музыкальн" in type_source:
                     data["event_type"] = "Литературно-музыкальная программа"
-                elif "экскурси" in text_content:
+                elif "музыкальн" in type_source or "вечер" in type_source or "джаз" in type_source:
+                    data["event_type"] = "Музыкальная программа"
+                elif "лекци" in type_source:
+                    data["event_type"] = "Лекция"
+                elif "экскурси" in type_source:
                     data["event_type"] = "Экскурсия"
-                elif "выставк" in text_content:
+                elif "выставк" in type_source:
                     data["event_type"] = "Выставка"
+                elif type_source:
+                    data["event_type"] = "Музейная программа"
                 
                 # Бронь и телефоны
                 if "предварительная запись" in text_content or "запись по телефону" in text_content:
