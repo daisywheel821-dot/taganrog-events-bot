@@ -1,9 +1,11 @@
 name: Daily Parser
-
 on:
   schedule:
     - cron: '0 6 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: write  # чтобы git push в последнем шаге не падал с ошибкой доступа
 
 jobs:
   run-parser:
@@ -11,21 +13,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run events bot script
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.CHAT_ID }}
         run: python taganrog_events_bot.py
-
       - name: Commit and push database
         run: |
           git config --global user.name "github-actions[bot]"
