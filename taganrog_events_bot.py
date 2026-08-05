@@ -201,7 +201,9 @@ def format_event_post(event: Event) -> str:
     if event.prices:
         lines.append(f"Стоимость билета: {html.escape(event.prices)}\n")
         
-    if event.requires_booking or (event.event_type and "Мастер-класс" in event.event_type):
+    is_booking_required = event.requires_booking or (event.event_type and "Мастер-класс" in event.event_type)
+
+    if is_booking_required:
         lines.append("<b><i>Предварительная запись обязательна!</i></b>")
         if event.phones:
             lines.append("Телефон для записи:")
@@ -210,6 +212,13 @@ def format_event_post(event: Event) -> str:
             lines.append("")
         else:
             lines.append("")
+    elif event.phones:
+        # Не мастер-класс и запись не обязательна, но на странице всё равно
+        # указан телефон для справок (как у обычных лекций/программ) — показываем.
+        lines.append("Телефоны для справок:")
+        for p in event.phones:
+            lines.append(html.escape(p))
+        lines.append("")
     
     if event.location:
         lines.append(f"{html.escape(event.location)}")
