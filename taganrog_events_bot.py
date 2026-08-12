@@ -95,18 +95,18 @@ def init_db():
     conn.commit()
     conn.close()
 
-def is_event_sent(url: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM sent_events WHERE url = ?", (url,))
-    result = cursor.fetchone()
-    conn.close()
-    return result is not None
-
 def mark_event_sent(url: str):
+    """Записывает время последней отправки события. Теперь это просто журнал
+    (когда в последний раз постили это событие), а НЕ блокировка повторной
+    отправки — событие может законно повторяться неделя за неделей, пока
+    его дата не прошла."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO sent_events (url) VALUES (?)", (url,))
+    cursor.execute(
+        "INSERT INTO sent_events (url) VALUES (?) "
+        "ON CONFLICT(url) DO UPDATE SET sent_at = CURRENT_TIMESTAMP",
+        (url,)
+    )
     conn.commit()
     conn.close()
 
@@ -403,9 +403,6 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
                                 
                         if not title:
                             continue
-                        if is_event_sent(event_url):
-                            logger.info(f"Пропуск (уже было отправлено ранее): {title} — {event_url}")
-                            continue
 
                         # Пропускаем дубли одного и того же события внутри текущего прогона
                         # (возникают из-за вложенных div-блоков с похожими классами)
@@ -529,6 +526,10 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
         logger.error(f"Ошибка Telegram при отправке '{event.title}': {e}")
 
 # ===================== ОСНОВНАЯ ТОЧКА ВХОДА =====================
+# Блок "Афиша музея" публикуется раз в неделю, по понедельникам.
+# Python: datetime.weekday() -> 0=понедельник ... 6=воскресенье.
+BLOCK_WEEKDAY = 0
+
 async def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
     user_id_str = os.environ.get("TELEGRAM_USER_ID") or os.getenv("CHAT_ID")
@@ -541,6 +542,17 @@ async def main():
         user_id = int(user_id_str)
     except ValueError:
         logger.error("Ошибка: TELEGRAM_USER_ID должен быть числовым значением.")
+        return
+
+    # FORCE_RUN=true отключает проверку дня недели — удобно для ручного
+    # тестирования блока в любой день, не трогая рабочее расписание.
+    force_run = os.environ.get("FORCE_RUN", "false").lower() == "true"
+    today_weekday = date.today().weekday()
+    if today_weekday != BLOCK_WEEKDAY and not force_run:
+        logger.info(
+            f"Сегодня не день блока 'Афиша музея' (нужен понедельник, "
+            f"сегодня день недели {today_weekday}) — пропускаем отправку."
+        )
         return
 
     init_db()
