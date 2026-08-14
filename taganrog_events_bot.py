@@ -81,6 +81,7 @@ class Event:
     hashtags: List[str] = field(default_factory=list)
     buy_ticket_url: str = ""
     image_url: Optional[str] = None
+    age_rating: str = ""
 
 # Заголовок поста зависит от того, какой это тематический блок недели.
 HEADERS_BY_CATEGORY = {
@@ -192,22 +193,63 @@ def extract_hashtags(text: str) -> List[str]:
     found = re.findall(r'#[A-Za-zА-Яа-яЁё0-9_]+', text)
     return list(dict.fromkeys(found))
 
+def fix_typography(text: str) -> str:
+    """Расставляет неразрывные пробелы по правилам русской типографики,
+    чтобы Telegram не переносил строку в неподходящем месте:
+    - между инициалами и фамилией ("А. П. Чехова" -> "А. П. Чехова" без
+      разрыва между буквами и фамилией);
+    - сразу после открывающей кавычки-«ёлочки» (чтобы кавычка не осталась
+      одна в конце строки, оторванная от текста в кавычках).
+    """
+    if not text:
+        return text
+    # Инициалы + фамилия: "А.П. Чехова" / "А. П. Чехова" -> неразрывные пробелы
+    text = re.sub(
+        r'([А-ЯЁ]\.)\s*([А-ЯЁ]\.)?\s+([А-ЯЁ][а-яё]+)',
+        lambda m: m.group(1) + '\u00A0' + ((m.group(2) + '\u00A0') if m.group(2) else '') + m.group(3),
+        text
+    )
+    # Открывающая кавычка не должна отрываться от следующего слова
+    text = text.replace('« ', '«\u00A0')
+    return text
+
+def split_address_lines(text: str) -> List[str]:
+    """Разбивает строку адреса/места по запятым на отдельные строки —
+    каждая часть с новой строки, как просили ('г. Таганрог' отдельно,
+    'Библиотека им. Чехова' отдельно и т.д.). Номер дома не отрывается от
+    названия улицы: если очередная часть после запятой — просто цифры/дробь
+    ('9', '104/1'), она приклеивается обратно к предыдущей строке.
+    """
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    merged: List[str] = []
+    for part in parts:
+        if merged and re.fullmatch(r'[\d/]+', part):
+            merged[-1] = f"{merged[-1]}, {part}"
+        else:
+            merged.append(part)
+    return merged
+
 def format_event_post(event: Event) -> str:
     lines = []
     header_text = HEADERS_BY_CATEGORY.get(event.category, HEADERS_BY_CATEGORY["museum"])
     lines.append(f"<b>{header_text}</b>")
     
     if event.event_type:
-        lines.append(f"<i>{html.escape(event.event_type)}</i>")
+        type_line = event.event_type
+        if event.age_rating:
+            type_line = f"{type_line} {event.age_rating}"
+        lines.append(f"<i>{html.escape(type_line)}</i>")
     
-    lines.append(f"<b>{html.escape(event.title)}</b>\n")
+    lines.append(f"<b>{html.escape(fix_typography(event.title))}</b>\n")
     
     if event.date_str:
         lines.append(f"Дата: {html.escape(event.date_str)}")
     if event.time_str:
         lines.append(f"Время: {html.escape(event.time_str)}")
     if event.prices:
-        lines.append(f"Стоимость билета: {html.escape(event.prices)}\n")
+        lines.append("Стоимость билета:")
+        lines.append(html.escape(event.prices))
+        lines.append("")
         
     is_booking_required = event.requires_booking or (event.event_type and "Мастер-класс" in event.event_type)
 
@@ -229,9 +271,13 @@ def format_event_post(event: Event) -> str:
         lines.append("")
     
     if event.location:
-        lines.append(f"{html.escape(event.location)}")
+        for part in split_address_lines(event.location):
+            lines.append(html.escape(fix_typography(part)))
     if event.address:
-        lines.append(f"Адрес: {html.escape(event.address)}\n")
+        lines.append("Адрес:")
+        for part in split_address_lines(event.address):
+            lines.append(html.escape(fix_typography(part)))
+        lines.append("")
 
     # Хештеги: используем реальные, указанные на странице события.
     # Если на странице их не нашли — подстраховка старыми общими тегами,
@@ -272,13 +318,16 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                 text_content = raw_text.lower()
 
                 # Тип события: берём из вступительной фразы страницы
-                # ("...приглашает N месяца на ЧТО-ТО...") — сайт всегда называет
-                # тип события напрямую в ней. НЕ ищем тип по всему тексту страницы:
+                # ("...приглашает [N месяца] на ЧТО-ТО...") — дата после
+                # "приглашает" необязательна, т.к. не все страницы пишут её
+                # сразу (например, у лекций дата иногда упоминается позже).
+                # НЕ ищем тип по всему тексту страницы для "экскурсии"/"выставки":
                 # в меню сайта на КАЖДОЙ странице есть постоянные пункты
                 # "ЭКСКУРСИИ" и "ВЫСТАВКИ", которые иначе ложно совпадают с любым
-                # событием, не попавшим в более ранние категории.
+                # событием, не попавшим в более ранние категории. Остальные типы
+                # безопасны для поиска по всему тексту (в меню их нет).
                 intro_match = re.search(
-                    r'приглаша\S*\s+\d{1,2}\s+[а-яё]+\s+на\s+([^.,«]{3,80})',
+                    r'приглаша\S*(?:\s+\d{1,2}\s+[а-яё]+)?\s+на\s+([^.,«]{3,80})',
                     text_content, re.IGNORECASE
                 )
                 type_source = intro_match.group(1) if intro_match else ""
@@ -290,11 +339,17 @@ async def parse_tgliamz_detail(session: aiohttp.ClientSession, detail_url: str) 
                 elif "музыкальн" in type_source or "вечер" in type_source or "джаз" in type_source:
                     data["event_type"] = "Музыкальная программа"
                 elif "лекци" in type_source:
-                    data["event_type"] = "Лекция"
+                    data["event_type"] = "Публичная лекция"
                 elif "экскурси" in type_source:
                     data["event_type"] = "Экскурсия"
                 elif "выставк" in type_source:
                     data["event_type"] = "Выставка"
+                elif "мастер-класс" in text_content or "мастер класс" in text_content:
+                    data["event_type"] = "Мастер-класс"
+                elif "литературно-музыкальн" in text_content:
+                    data["event_type"] = "Литературно-музыкальная программа"
+                elif "публичную лекцию" in text_content or "публичная лекция" in text_content or "лекци" in text_content:
+                    data["event_type"] = "Публичная лекция"
                 elif type_source:
                     data["event_type"] = "Музейная программа"
                 
@@ -507,7 +562,8 @@ AFISHAGORODA_EXCLUDED_SLUGS = {
 async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: str) -> dict:
     data = {
         "date_str": "", "parsed_date": None, "time_str": "",
-        "location": "", "prices": "", "buy_ticket_url": "", "image_url": None,
+        "location": "", "prices": "", "age_rating": "",
+        "buy_ticket_url": "", "image_url": None,
     }
     try:
         async with session.get(detail_url, headers=HEADERS, timeout=10) as resp:
@@ -537,6 +593,10 @@ async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: 
             if price_match:
                 data["prices"] = price_match.group(1).strip(" .,")
 
+            age_match = re.search(r'Возрастные ограничения:\s*(\d{1,2}\+)', text)
+            if age_match:
+                data["age_rating"] = age_match.group(1)
+
             img_tag = soup.find("img", src=re.compile(r'/storage/|/media/', re.I))
             if img_tag and img_tag.get("src"):
                 data["image_url"] = urljoin(AFISHAGORODA_BASE, img_tag["src"])
@@ -555,6 +615,14 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
     events = []
     seen_urls = set()
     url = f"{AFISHAGORODA_BASE}/events/koncert"
+
+    # Общие тексты служебных ссылок (кнопка "Подробнее", "Купить билет" и т.п.),
+    # которые ведут на ту же страницу события, что и ссылка с настоящим
+    # названием. Если взять текст такой ссылки первым — вместо имени
+    # исполнителя в посте окажется "Подробнее...". Пропускаем такие ссылки
+    # и ждём следующую с тем же URL, но настоящим названием.
+    generic_link_texts = {"подробнее", "купить билет", "билеты", "смотреть", "подробности", "далее"}
+
     try:
         async with session.get(url, headers=HEADERS, timeout=12) as resp:
             if resp.status != 200:
@@ -581,6 +649,8 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
                     title = a_tag.get_text(strip=True)
                     if not title:
                         continue
+                    if title.rstrip(".…").strip().lower() in generic_link_texts:
+                        continue
 
                     event_url = urljoin(AFISHAGORODA_BASE, href)
                     if event_url in seen_urls:
@@ -604,6 +674,7 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
                         time_str=detail_data.get("time_str", ""),
                         location=detail_data.get("location", ""),
                         prices=detail_data.get("prices", ""),
+                        age_rating=detail_data.get("age_rating", ""),
                         hashtags=["#Концерт", "#Таганрог", "#афиша"],
                         buy_ticket_url=detail_data.get("buy_ticket_url", ""),
                         image_url=detail_data.get("image_url"),
