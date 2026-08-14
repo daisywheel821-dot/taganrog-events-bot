@@ -67,6 +67,7 @@ MUSEUM_BRANCHES = [
 class Event:
     title: str
     url: str
+    category: str = "museum"
     event_type: str = ""
     date_str: str = ""
     parsed_date: Optional[date] = None
@@ -80,6 +81,12 @@ class Event:
     hashtags: List[str] = field(default_factory=list)
     buy_ticket_url: str = ""
     image_url: Optional[str] = None
+
+# Заголовок поста зависит от того, какой это тематический блок недели.
+HEADERS_BY_CATEGORY = {
+    "museum": "МУЗЕЙНАЯ АФИША ТАГАНРОГА",
+    "concerts": "АФИША КОНЦЕРТОВ ТАГАНРОГА",
+}
 
 # ===================== БАЗА ДАННЫХ SQLite =====================
 def init_db():
@@ -187,7 +194,8 @@ def extract_hashtags(text: str) -> List[str]:
 
 def format_event_post(event: Event) -> str:
     lines = []
-    lines.append("<b>МУЗЕЙНАЯ АФИША ТАГАНРОГА</b>")
+    header_text = HEADERS_BY_CATEGORY.get(event.category, HEADERS_BY_CATEGORY["museum"])
+    lines.append(f"<b>{header_text}</b>")
     
     if event.event_type:
         lines.append(f"<i>{html.escape(event.event_type)}</i>")
@@ -483,6 +491,132 @@ async def parse_tgliamz_museums(session: aiohttp.ClientSession) -> List[Event]:
         logger.error(f"Ошибка при парсинге календаря TGLIAMZ: {e}")
     return events
 
+# ===================== ПАРСИНГ AFISHAGORODA (КОНЦЕРТЫ) =====================
+
+# Общая ссылка на кассу/покупку через виджет — не индивидуальная, при встрече
+# исключаем её так же, как исключали общую ссылку на vmuzey.com у музея.
+AFISHAGORODA_BASE = "https://tag.afishagoroda.ru"
+
+# Разделы меню сайта — это не события, а категории, ссылки на них выглядят
+# точно так же (/events/<slug>), поэтому явно исключаем по названию раздела.
+AFISHAGORODA_EXCLUDED_SLUGS = {
+    "koncert", "teatr", "show", "muzei", "excursions", "vystavka",
+    "detiam", "stand-up", "kvest", "cirk", "sport"
+}
+
+async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: str) -> dict:
+    data = {
+        "date_str": "", "parsed_date": None, "time_str": "",
+        "location": "", "prices": "", "buy_ticket_url": "", "image_url": None,
+    }
+    try:
+        async with session.get(detail_url, headers=HEADERS, timeout=10) as resp:
+            if resp.status != 200:
+                return data
+            html_text = await resp.text()
+            soup = BeautifulSoup(html_text, "html.parser")
+            text = soup.get_text(separator=" ")
+
+            # Структурированный блок вида:
+            # "Когда: 07.09.2026 19:00 Где: г. Таганрог, ... Стоимость билетов: от 2500 до 5500 рублей"
+            when_match = re.search(r'Когда:\s*(\d{2}\.\d{2}\.\d{4})\s+(\d{1,2}:\d{2})', text)
+            if when_match:
+                day, month, year = when_match.group(1).split(".")
+                try:
+                    data["parsed_date"] = date(int(year), int(month), int(day))
+                    data["date_str"] = f"{int(day)} {REVERSE_MONTH_MAP.get(int(month), '')}"
+                except ValueError:
+                    pass
+                data["time_str"] = when_match.group(2)
+
+            where_match = re.search(r'Где:\s*(.+?)\s*(?=Стоимость билетов:|Возрастные ограничения:|$)', text)
+            if where_match:
+                data["location"] = where_match.group(1).strip(" .,")
+
+            price_match = re.search(r'Стоимость билетов:\s*(.+?)\s*(?=Возрастные ограничения:|$)', text)
+            if price_match:
+                data["prices"] = price_match.group(1).strip(" .,")
+
+            img_tag = soup.find("img", src=re.compile(r'/storage/|/media/', re.I))
+            if img_tag and img_tag.get("src"):
+                data["image_url"] = urljoin(AFISHAGORODA_BASE, img_tag["src"])
+
+            # Индивидуальной ссылки на билет в обычном HTML, скорее всего, нет —
+            # кнопка покупки грузится сторонним JS-виджетом (widget.afisha.yandex.ru),
+            # который простой парсер не видит. Поэтому ведём кнопку на саму
+            # страницу события у них на сайте — там подписчик увидит виджет и купит.
+            data["buy_ticket_url"] = detail_url
+
+    except Exception as e:
+        logger.error(f"Ошибка при парсинге детальной страницы afishagoroda {detail_url}: {e}")
+    return data
+
+async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Event]:
+    events = []
+    seen_urls = set()
+    url = f"{AFISHAGORODA_BASE}/events/koncert"
+    try:
+        async with session.get(url, headers=HEADERS, timeout=12) as resp:
+            if resp.status != 200:
+                logger.error(f"afishagoroda concert: неожиданный статус {resp.status}")
+                return events
+            html_text = await resp.text()
+            soup = BeautifulSoup(html_text, "html.parser")
+
+            # Ищем все ссылки на отдельные события (/events/<название>), а не
+            # гадаем CSS-классы карточек — так надёжнее без реального доступа
+            # к разметке сайта.
+            candidate_links = soup.find_all("a", href=re.compile(r'/events/[a-z0-9\-]+/?$', re.I))
+            logger.info(f"afishagoroda concert: найдено ссылок-кандидатов: {len(candidate_links)}")
+
+            for a_tag in candidate_links:
+                title = ""
+                href = ""
+                try:
+                    href = a_tag.get("href", "")
+                    slug = href.rstrip("/").split("/")[-1].lower()
+                    if slug in AFISHAGORODA_EXCLUDED_SLUGS:
+                        continue
+
+                    title = a_tag.get_text(strip=True)
+                    if not title:
+                        continue
+
+                    event_url = urljoin(AFISHAGORODA_BASE, href)
+                    if event_url in seen_urls:
+                        continue
+                    seen_urls.add(event_url)
+
+                    detail_data = await parse_afishagoroda_detail(session, event_url)
+
+                    parsed_date = detail_data.get("parsed_date")
+                    if parsed_date and parsed_date < date.today():
+                        logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
+                        continue
+
+                    event = Event(
+                        title=title,
+                        url=event_url,
+                        category="concerts",
+                        event_type="Концерт",
+                        date_str=detail_data.get("date_str", ""),
+                        parsed_date=parsed_date,
+                        time_str=detail_data.get("time_str", ""),
+                        location=detail_data.get("location", ""),
+                        prices=detail_data.get("prices", ""),
+                        hashtags=["#Концерт", "#Таганрог", "#афиша"],
+                        buy_ticket_url=detail_data.get("buy_ticket_url", ""),
+                        image_url=detail_data.get("image_url"),
+                    )
+                    events.append(event)
+                    logger.info(f"Событие добавлено к отправке: {title} ({parsed_date})")
+                except Exception as item_err:
+                    logger.error(f"Ошибка при обработке карточки afishagoroda '{title or href}': {item_err}")
+                    continue
+    except Exception as e:
+        logger.error(f"Ошибка при парсинге afishagoroda (концерты): {e}")
+    return events
+
 # ===================== ОТПРАВКА В TELEGRAM =====================
 async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: aiohttp.ClientSession):
     text = format_event_post(event)
@@ -526,9 +660,23 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
         logger.error(f"Ошибка Telegram при отправке '{event.title}': {e}")
 
 # ===================== ОСНОВНАЯ ТОЧКА ВХОДА =====================
-# Блок "Афиша музея" публикуется раз в неделю, по понедельникам.
+# Какой блок публикуется в какой день недели.
 # Python: datetime.weekday() -> 0=понедельник ... 6=воскресенье.
-BLOCK_WEEKDAY = 0
+# Остальные дни добавляем по мере готовности парсеров.
+WEEKDAY_BLOCKS = {
+    0: "museum",
+    1: "concerts",
+}
+
+async def run_block(block_name: str, session: aiohttp.ClientSession) -> List[Event]:
+    """Запускает нужный парсер по названию блока."""
+    if block_name == "museum":
+        return await parse_tgliamz_museums(session)
+    elif block_name == "concerts":
+        return await parse_afishagoroda_concerts(session)
+    else:
+        logger.error(f"Неизвестный блок: {block_name}")
+        return []
 
 async def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
@@ -544,23 +692,24 @@ async def main():
         logger.error("Ошибка: TELEGRAM_USER_ID должен быть числовым значением.")
         return
 
-    # FORCE_RUN=true отключает проверку дня недели — удобно для ручного
-    # тестирования блока в любой день, не трогая рабочее расписание.
-    force_run = os.environ.get("FORCE_RUN", "false").lower() == "true"
+    # FORCE_BLOCK=museum (или concerts, и т.д.) запускает конкретный блок
+    # вручную, независимо от дня недели — удобно для тестирования.
+    force_block = os.environ.get("FORCE_BLOCK", "").strip().lower()
     today_weekday = date.today().weekday()
-    if today_weekday != BLOCK_WEEKDAY and not force_run:
-        logger.info(
-            f"Сегодня не день блока 'Афиша музея' (нужен понедельник, "
-            f"сегодня день недели {today_weekday}) — пропускаем отправку."
-        )
+    block_name = force_block or WEEKDAY_BLOCKS.get(today_weekday)
+
+    if not block_name:
+        logger.info(f"Сегодня (день недели {today_weekday}) не назначен ни один блок — пропускаем.")
         return
+
+    logger.info(f"Запускаем блок: {block_name}")
 
     init_db()
     bot = Bot(token=token)
 
     async with aiohttp.ClientSession() as session:
         logger.info("Начинаем сбор событий...")
-        events = await parse_tgliamz_museums(session)
+        events = await run_block(block_name, session)
         
         # Строгая хронологическая сортировка (от ранних к поздним)
         events.sort(key=lambda x: (x.parsed_date or date.max, x.time_str))
