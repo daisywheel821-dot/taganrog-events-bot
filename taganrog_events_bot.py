@@ -590,12 +590,16 @@ async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: 
             soup = BeautifulSoup(html_text, "html.parser")
             text = soup.get_text(separator=" ")
 
-            # Название события — из структурированного блока "Мероприятие: X",
-            # а не из текста ссылки на странице списка (там могут быть служебные
-            # ссылки вроде "Подробнее...", ведущие на тот же URL).
-            title_match = re.search(r'Мероприятие:\s*(.+?)\s*(?=Когда:|$)', text)
-            if title_match:
-                data["title"] = title_match.group(1).strip(" .,")
+            # Название события: сначала пробуем <h1> — это заголовок страницы,
+            # он есть почти на любом шаблоне сайта. Если его нет — резервный
+            # вариант: структурированный блок "Мероприятие: X".
+            h1_tag = soup.find("h1")
+            if h1_tag:
+                data["title"] = h1_tag.get_text(strip=True)
+            if not data["title"]:
+                title_match = re.search(r'Мероприятие:\s*(.+?)\s*(?=Когда:|$)', text)
+                if title_match:
+                    data["title"] = title_match.group(1).strip(" .,")
 
             # Структурированный блок вида:
             # "Когда: 07.09.2026 19:00 Где: г. Таганрог, ... Стоимость билетов: от 2500 до 5500 рублей"
@@ -684,11 +688,26 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
                     if not title:
                         continue
 
+                    # Заслон от чужих категорий, которые могут просочиться через
+                    # блок "рекомендуем также"/"похожие мероприятия" на странице
+                    # концертов — это явно не концерт, судя по названию.
+                    non_concert_hints = ("экскурси", "мастер-класс", "выставк", "лекци")
+                    if any(hint in title.lower() for hint in non_concert_hints):
+                        logger.info(f"Пропуск (похоже, не концерт по названию): {title}")
+                        continue
+
                     parsed_date = detail_data.get("parsed_date")
-                    if parsed_date and parsed_date < date.today():
+                    if not parsed_date:
+                        # Дату не удалось распознать (например, у событий с
+                        # несколькими датами/диапазоном показов формат страницы
+                        # другой) — пропускаем, а не показываем без даты и не
+                        # пропускаем мимо фильтра на 3 месяца вперёд.
+                        logger.info(f"Пропуск (не удалось определить дату): {title} — {event_url}")
+                        continue
+                    if parsed_date < date.today():
                         logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
                         continue
-                    if parsed_date and parsed_date > lookahead_limit:
+                    if parsed_date > lookahead_limit:
                         logger.info(f"Пропуск (дальше 3 месяцев вперёд, {parsed_date}): {title}")
                         continue
 
