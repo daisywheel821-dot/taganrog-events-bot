@@ -5,7 +5,7 @@ import sqlite3
 import html
 import io
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from dataclasses import dataclass, field
 from typing import List, Optional
 from urllib.parse import urljoin
@@ -227,7 +227,19 @@ def split_address_lines(text: str) -> List[str]:
             merged[-1] = f"{merged[-1]}, {part}"
         else:
             merged.append(part)
-    return merged
+
+    # Убираем повторяющиеся части (например, "г. Таганрог" на некоторых
+    # страницах указан в исходных данных дважды) — без учёта регистра,
+    # оставляем первое вхождение.
+    seen_lower = set()
+    deduped: List[str] = []
+    for part in merged:
+        key = part.lower()
+        if key in seen_lower:
+            continue
+        seen_lower.add(key)
+        deduped.append(part)
+    return deduped
 
 def format_event_post(event: Event) -> str:
     lines = []
@@ -556,12 +568,17 @@ AFISHAGORODA_BASE = "https://tag.afishagoroda.ru"
 # точно так же (/events/<slug>), поэтому явно исключаем по названию раздела.
 AFISHAGORODA_EXCLUDED_SLUGS = {
     "koncert", "teatr", "show", "muzei", "excursions", "vystavka",
-    "detiam", "stand-up", "kvest", "cirk", "sport"
+    "detiam", "stand-up", "kvest", "cirk", "sport", "bonus"
 }
+
+# Страница бонусной программы сайта — добавляем на неё кликабельную ссылку
+# в каждом посте с afishagoroda.ru вместо того, чтобы присылать её как
+# отдельное "событие" (ей ошибочно был раньше первый попавшийся URL /events/bonus).
+AFISHAGORODA_BONUS_URL = f"{AFISHAGORODA_BASE}/events/bonus"
 
 async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: str) -> dict:
     data = {
-        "date_str": "", "parsed_date": None, "time_str": "",
+        "title": "", "date_str": "", "parsed_date": None, "time_str": "",
         "location": "", "prices": "", "age_rating": "",
         "buy_ticket_url": "", "image_url": None,
     }
@@ -572,6 +589,13 @@ async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: 
             html_text = await resp.text()
             soup = BeautifulSoup(html_text, "html.parser")
             text = soup.get_text(separator=" ")
+
+            # Название события — из структурированного блока "Мероприятие: X",
+            # а не из текста ссылки на странице списка (там могут быть служебные
+            # ссылки вроде "Подробнее...", ведущие на тот же URL).
+            title_match = re.search(r'Мероприятие:\s*(.+?)\s*(?=Когда:|$)', text)
+            if title_match:
+                data["title"] = title_match.group(1).strip(" .,")
 
             # Структурированный блок вида:
             # "Когда: 07.09.2026 19:00 Где: г. Таганрог, ... Стоимость билетов: от 2500 до 5500 рублей"
@@ -616,12 +640,9 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
     seen_urls = set()
     url = f"{AFISHAGORODA_BASE}/events/koncert"
 
-    # Общие тексты служебных ссылок (кнопка "Подробнее", "Купить билет" и т.п.),
-    # которые ведут на ту же страницу события, что и ссылка с настоящим
-    # названием. Если взять текст такой ссылки первым — вместо имени
-    # исполнителя в посте окажется "Подробнее...". Пропускаем такие ссылки
-    # и ждём следующую с тем же URL, но настоящим названием.
-    generic_link_texts = {"подробнее", "купить билет", "билеты", "смотреть", "подробности", "далее"}
+    # Показываем события не дальше чем на 3 месяца вперёд — билеты уже можно
+    # купить заранее, но не переспамливаем канал слишком дальними анонсами.
+    lookahead_limit = date.today() + timedelta(days=90)
 
     try:
         async with session.get(url, headers=HEADERS, timeout=12) as resp:
@@ -633,24 +654,22 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
 
             # Ищем все ссылки на отдельные события (/events/<название>), а не
             # гадаем CSS-классы карточек — так надёжнее без реального доступа
-            # к разметке сайта.
+            # к разметке сайта. Текст самой ссылки роли не играет — название
+            # события берём с детальной страницы (см. ниже), где оно указано
+            # в чётком структурированном виде.
             candidate_links = soup.find_all("a", href=re.compile(r'/events/[a-z0-9\-]+/?$', re.I))
             logger.info(f"afishagoroda concert: найдено ссылок-кандидатов: {len(candidate_links)}")
 
             for a_tag in candidate_links:
-                title = ""
                 href = ""
+                fallback_title = ""
                 try:
                     href = a_tag.get("href", "")
                     slug = href.rstrip("/").split("/")[-1].lower()
                     if slug in AFISHAGORODA_EXCLUDED_SLUGS:
                         continue
 
-                    title = a_tag.get_text(strip=True)
-                    if not title:
-                        continue
-                    if title.rstrip(".…").strip().lower() in generic_link_texts:
-                        continue
+                    fallback_title = a_tag.get_text(strip=True)
 
                     event_url = urljoin(AFISHAGORODA_BASE, href)
                     if event_url in seen_urls:
@@ -659,9 +678,18 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
 
                     detail_data = await parse_afishagoroda_detail(session, event_url)
 
+                    # Название берём с детальной страницы (надёжно); если там
+                    # почему-то не нашлось — запасной вариант из текста ссылки.
+                    title = detail_data.get("title") or fallback_title
+                    if not title:
+                        continue
+
                     parsed_date = detail_data.get("parsed_date")
                     if parsed_date and parsed_date < date.today():
                         logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
+                        continue
+                    if parsed_date and parsed_date > lookahead_limit:
+                        logger.info(f"Пропуск (дальше 3 месяцев вперёд, {parsed_date}): {title}")
                         continue
 
                     event = Event(
@@ -682,7 +710,7 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
                     events.append(event)
                     logger.info(f"Событие добавлено к отправке: {title} ({parsed_date})")
                 except Exception as item_err:
-                    logger.error(f"Ошибка при обработке карточки afishagoroda '{title or href}': {item_err}")
+                    logger.error(f"Ошибка при обработке карточки afishagoroda '{fallback_title or href}': {item_err}")
                     continue
     except Exception as e:
         logger.error(f"Ошибка при парсинге afishagoroda (концерты): {e}")
@@ -695,6 +723,8 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
     keyboard = []
     if event.buy_ticket_url:
         keyboard.append([InlineKeyboardButton("Купить билет", url=event.buy_ticket_url)])
+    if event.category == "concerts":
+        keyboard.append([InlineKeyboardButton("Бонусная программа", url=AFISHAGORODA_BONUS_URL)])
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     
     try:
