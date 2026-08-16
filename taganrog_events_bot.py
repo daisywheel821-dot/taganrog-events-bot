@@ -28,7 +28,8 @@ DB_PATH = "data/taganrog_events.db"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
 STRICT_SOUVENIR_WORDS = [
@@ -759,8 +760,9 @@ async def _fetch_charly_day_model(session: aiohttp.ClientSession, url: str) -> O
     возвращает распарсенный словарь model из window.__nrp (или None при ошибке)."""
     try:
         async with session.get(url, headers=HEADERS, timeout=15) as resp:
+            final_url = str(resp.url)
             if resp.status != 200:
-                logger.error(f"charly cinema: неожиданный статус {resp.status} для {url}")
+                logger.error(f"charly cinema: неожиданный статус {resp.status} для {url} (итоговый URL: {final_url})")
                 return None
             html_text = await resp.text()
     except Exception as e:
@@ -769,7 +771,16 @@ async def _fetch_charly_day_model(session: aiohttp.ClientSession, url: str) -> O
 
     idx = html_text.find(NRP_JSON_MARKER)
     if idx == -1:
-        logger.error(f"charly cinema: не найден блок window.__nrp на {url} (сайт мог измениться)")
+        # Диагностика: логируем куда реально привёл запрос (afisha.ru может
+        # редиректить дата-центровые IP на антибот-страницу/капчу), длину
+        # ответа и начало текста — чтобы понять, что именно вернул сервер,
+        # не имея возможности воспроизвести это из песочницы напрямую.
+        snippet = re.sub(r"\s+", " ", html_text[:500]).strip()
+        logger.error(
+            f"charly cinema: не найден блок window.__nrp на {url} (сайт мог измениться). "
+            f"Итоговый URL: {final_url}, длина ответа: {len(html_text)} симв. "
+            f"Начало ответа: {snippet}"
+        )
         return None
 
     # Ищем JSON не через regex до "закрывающей скобки" (вложенных фигурных
