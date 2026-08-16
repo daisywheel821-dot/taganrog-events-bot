@@ -4,6 +4,7 @@ import os
 import sqlite3
 import html
 import io
+import json
 import re
 from datetime import datetime, date, timedelta
 from dataclasses import dataclass, field
@@ -87,6 +88,7 @@ class Event:
 HEADERS_BY_CATEGORY = {
     "museum": "МУЗЕЙНАЯ АФИША ТАГАНРОГА",
     "concerts": "АФИША КОНЦЕРТОВ ТАГАНРОГА",
+    "cinema": "АФИША КИНО ТАГАНРОГА",
 }
 
 # ===================== БАЗА ДАННЫХ SQLite =====================
@@ -735,6 +737,126 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
         logger.error(f"Ошибка при парсинге afishagoroda (концерты): {e}")
     return events
 
+# ===================== ПАРСИНГ AFISHA.RU (КИНО, ЧАРЛИ МАРМЕЛАД) =====================
+# kinocharly.ru отдаёт пустую страницу простому парсеру (сайт на JS), поэтому
+# используем afisha.ru как рабочую альтернативу для того же кинотеатра.
+CHARLY_BASE = "https://www.afisha.ru"
+CHARLY_CINEMA_URL = f"{CHARLY_BASE}/taganrog/cinema/charli-marmelad-taganrog-9584/movie/"
+
+# Данные о расписании на странице не лежат в удобных CSS-классах (они
+# хэшированные и могут поменяться при любом редизайне сайта) — вместо этого
+# вся структурированная информация зашита в JS-объект window.__nrp прямо
+# в HTML. Это гораздо надёжнее для парсинга, чем гадать классы карточек.
+NRP_JSON_MARKER = "['root'] = "
+
+async def parse_charly_cinema(session: aiohttp.ClientSession) -> List[Event]:
+    """Кинотеатр «Чарли Мармелад» — блок-напоминание без дедупа по датам:
+    страница отдаёт сеансы на СЕГОДНЯ (день запуска блока), поэтому каждый
+    фильм текущего репертуара публикуется отдельным сообщением с сегодняшними
+    сеансами. Если понадобится расписание на несколько дней вперёд — сайт
+    поддерживает страницы вида .../movie/17-08-2026, можно расширить позже.
+    """
+    events = []
+    try:
+        async with session.get(CHARLY_CINEMA_URL, headers=HEADERS, timeout=15) as resp:
+            if resp.status != 200:
+                logger.error(f"charly cinema: неожиданный статус {resp.status}")
+                return events
+            html_text = await resp.text()
+
+        idx = html_text.find(NRP_JSON_MARKER)
+        if idx == -1:
+            logger.error("charly cinema: не найден блок window.__nrp с данными расписания (сайт мог измениться)")
+            return events
+
+        # Ищем JSON не через regex до "закрывающей скобки" (вложенных фигурных
+        # скобок в объекте слишком много, чтобы поймать регуляркой надёжно),
+        # а через инкрементальный разбор с raw_decode — он сам находит конец
+        # первого валидного JSON-значения, что бы ни шло дальше в файле.
+        start = idx + len(NRP_JSON_MARKER)
+        decoder = json.JSONDecoder()
+        data, _ = decoder.raw_decode(html_text[start:])
+
+        model = data.get("model", {}) or {}
+        items = (
+            model.get("Schedule", {}) or {}
+        ).get("MovieWidget", {}) or {}
+        items = items.get("Items", []) or []
+
+        if not items:
+            logger.info("charly cinema: на сегодня в расписании нет фильмов")
+            return events
+
+        place_address = (model.get("PlaceInfo", {}) or {}).get(
+            "AddressWithOptionalCity", "Таганрог, пл. Мира, 7, ТРЦ «Мармелад»"
+        )
+
+        today = date.today()
+        today_str = f"{today.day} {REVERSE_MONTH_MAP.get(today.month, '')}"
+
+        for item in items:
+            movie = {}
+            try:
+                movie = item.get("Movie", {}) or {}
+                sessions = item.get("Sessions", []) or []
+
+                title = (movie.get("Name") or "").strip()
+                if not title:
+                    continue
+
+                movie_url = urljoin(CHARLY_BASE, movie.get("Url", ""))
+
+                genres = [
+                    g.get("Name", "") for g in (movie.get("Genres", {}) or {}).get("Links", [])
+                    if g.get("Name")
+                ]
+                duration = movie.get("Duration", "")
+                type_parts = [", ".join(genres)] if genres else []
+                if duration:
+                    type_parts.append(duration)
+                event_type = " · ".join(p for p in type_parts if p)
+
+                age_rating = movie.get("AgeRestriction", "")
+
+                schedule_info = movie.get("ScheduleInfo", {}) or {}
+                # Прямая ссылка на страницу покупки билета на сайте —
+                # в отличие от afishagoroda.ru, тут это не JS-виджет,
+                # а обычный путь сайта, реально присутствующий в HTML.
+                ticket_path = schedule_info.get("Url", "")
+                buy_ticket_url = urljoin(CHARLY_BASE, ticket_path) if ticket_path else movie_url
+
+                min_price = schedule_info.get("MinPrice")
+                prices = f"от {int(min_price)} ₽" if min_price else ""
+
+                session_times = [s.get("Time", "") for s in sessions if s.get("Time")]
+                time_str = ", ".join(session_times)
+
+                image_url = (movie.get("Poster", {}) or {}).get("Url")
+
+                event = Event(
+                    title=title,
+                    url=movie_url,
+                    category="cinema",
+                    event_type=event_type,
+                    date_str=today_str,
+                    parsed_date=today,
+                    time_str=time_str,
+                    location=place_address,
+                    prices=prices,
+                    age_rating=age_rating,
+                    hashtags=["#Кино", "#Таганрог", "#афиша"],
+                    buy_ticket_url=buy_ticket_url,
+                    image_url=image_url,
+                )
+                events.append(event)
+                logger.info(f"Фильм добавлен к отправке: {title} (сеансы: {time_str})")
+            except Exception as item_err:
+                logger.error(f"Ошибка при обработке фильма '{movie.get('Name', '?')}': {item_err}")
+                continue
+    except Exception as e:
+        logger.error(f"Ошибка при парсинге afisha.ru (кино, Чарли Мармелад): {e}")
+    return events
+
 # ===================== ОТПРАВКА В TELEGRAM =====================
 async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: aiohttp.ClientSession):
     text = format_event_post(event)
@@ -786,6 +908,7 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
 WEEKDAY_BLOCKS = {
     0: "museum",
     1: "concerts",
+    3: "cinema",
 }
 
 async def run_block(block_name: str, session: aiohttp.ClientSession) -> List[Event]:
@@ -794,6 +917,8 @@ async def run_block(block_name: str, session: aiohttp.ClientSession) -> List[Eve
         return await parse_tgliamz_museums(session)
     elif block_name == "concerts":
         return await parse_afishagoroda_concerts(session)
+    elif block_name == "cinema":
+        return await parse_charly_cinema(session)
     else:
         logger.error(f"Неизвестный блок: {block_name}")
         return []
