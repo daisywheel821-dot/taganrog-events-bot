@@ -749,63 +749,126 @@ CHARLY_CINEMA_URL = f"{CHARLY_BASE}/taganrog/cinema/charli-marmelad-taganrog-958
 # в HTML. Это гораздо надёжнее для парсинга, чем гадать классы карточек.
 NRP_JSON_MARKER = "['root'] = "
 
-async def parse_charly_cinema(session: aiohttp.ClientSession) -> List[Event]:
-    """Кинотеатр «Чарли Мармелад» — блок-напоминание без дедупа по датам:
-    страница отдаёт сеансы на СЕГОДНЯ (день запуска блока), поэтому каждый
-    фильм текущего репертуара публикуется отдельным сообщением с сегодняшними
-    сеансами. Если понадобится расписание на несколько дней вперёд — сайт
-    поддерживает страницы вида .../movie/17-08-2026, можно расширить позже.
-    """
-    events = []
+# Блок «Кино» в графике стоит только раз в неделю (по четвергам), поэтому
+# вместо сеансов на один день собираем расписание на всю предстоящую
+# неделю: сегодня + 6 дней вперёд.
+CINEMA_WEEK_DAYS_AHEAD = 6
+
+async def _fetch_charly_day_model(session: aiohttp.ClientSession, url: str) -> Optional[dict]:
+    """Загружает страницу репертуара кинотеатра на конкретный день и
+    возвращает распарсенный словарь model из window.__nrp (или None при ошибке)."""
     try:
-        async with session.get(CHARLY_CINEMA_URL, headers=HEADERS, timeout=15) as resp:
+        async with session.get(url, headers=HEADERS, timeout=15) as resp:
             if resp.status != 200:
-                logger.error(f"charly cinema: неожиданный статус {resp.status}")
-                return events
+                logger.error(f"charly cinema: неожиданный статус {resp.status} для {url}")
+                return None
             html_text = await resp.text()
+    except Exception as e:
+        logger.error(f"charly cinema: ошибка запроса {url}: {e}")
+        return None
 
-        idx = html_text.find(NRP_JSON_MARKER)
-        if idx == -1:
-            logger.error("charly cinema: не найден блок window.__nrp с данными расписания (сайт мог измениться)")
-            return events
+    idx = html_text.find(NRP_JSON_MARKER)
+    if idx == -1:
+        logger.error(f"charly cinema: не найден блок window.__nrp на {url} (сайт мог измениться)")
+        return None
 
-        # Ищем JSON не через regex до "закрывающей скобки" (вложенных фигурных
-        # скобок в объекте слишком много, чтобы поймать регуляркой надёжно),
-        # а через инкрементальный разбор с raw_decode — он сам находит конец
-        # первого валидного JSON-значения, что бы ни шло дальше в файле.
-        start = idx + len(NRP_JSON_MARKER)
-        decoder = json.JSONDecoder()
-        data, _ = decoder.raw_decode(html_text[start:])
+    # Ищем JSON не через regex до "закрывающей скобки" (вложенных фигурных
+    # скобок в объекте слишком много, чтобы поймать регуляркой надёжно),
+    # а через инкрементальный разбор с raw_decode — он сам находит конец
+    # первого валидного JSON-значения, что бы ни шло дальше в файле.
+    start = idx + len(NRP_JSON_MARKER)
+    try:
+        data, _ = json.JSONDecoder().raw_decode(html_text[start:])
+    except Exception as e:
+        logger.error(f"charly cinema: не удалось разобрать JSON на {url}: {e}")
+        return None
 
-        model = data.get("model", {}) or {}
-        items = (
-            model.get("Schedule", {}) or {}
-        ).get("MovieWidget", {}) or {}
-        items = items.get("Items", []) or []
+    return data.get("model", {}) or {}
 
-        if not items:
-            logger.info("charly cinema: на сегодня в расписании нет фильмов")
-            return events
+def _format_cinema_date_range(dates: List[date]) -> str:
+    """Компактно форматирует список дат показа: одиночная дата, сплошной
+    диапазон ("16–19 августа") или перечисление вразнобой ("16, 18, 20 августа")."""
+    if not dates:
+        return ""
+    if len(dates) == 1:
+        d = dates[0]
+        return f"{d.day} {REVERSE_MONTH_MAP.get(d.month, '')}"
 
-        place_address = (model.get("PlaceInfo", {}) or {}).get(
-            "AddressWithOptionalCity", "Таганрог, пл. Мира, 7, ТРЦ «Мармелад»"
+    is_contiguous = all((dates[i + 1] - dates[i]).days == 1 for i in range(len(dates) - 1))
+    if is_contiguous:
+        first, last = dates[0], dates[-1]
+        if first.month == last.month:
+            return f"{first.day}–{last.day} {REVERSE_MONTH_MAP.get(last.month, '')}"
+        return (
+            f"{first.day} {REVERSE_MONTH_MAP.get(first.month, '')} – "
+            f"{last.day} {REVERSE_MONTH_MAP.get(last.month, '')}"
         )
 
-        today = date.today()
-        today_str = f"{today.day} {REVERSE_MONTH_MAP.get(today.month, '')}"
+    if all(d.month == dates[0].month for d in dates):
+        days_list = ", ".join(str(d.day) for d in dates)
+        return f"{days_list} {REVERSE_MONTH_MAP.get(dates[0].month, '')}"
+    return ", ".join(f"{d.day} {REVERSE_MONTH_MAP.get(d.month, '')}" for d in dates)
 
+async def parse_charly_cinema(session: aiohttp.ClientSession) -> List[Event]:
+    """Кинотеатр «Чарли Мармелад»: блок в графике стоит один раз в неделю,
+    поэтому вместо сеансов только на день запуска блока собираем расписание
+    на всю предстоящую неделю (сегодня + 6 дней) и публикуем один пост на
+    фильм с полной раскладкой сеансов по датам.
+    """
+    events: List[Event] = []
+    today = date.today()
+
+    base_model = await _fetch_charly_day_model(session, CHARLY_CINEMA_URL)
+    if base_model is None:
+        return events
+
+    place_address = (base_model.get("PlaceInfo", {}) or {}).get(
+        "AddressWithOptionalCity", "Таганрог, пл. Мира, 7, ТРЦ «Мармелад»"
+    )
+
+    available_days = (
+        ((base_model.get("Schedule", {}) or {}).get("MovieWidget", {}) or {})
+        .get("FilterMenu", {})
+        .get("Calendar", {})
+        .get("AvailableDays", [])
+        or []
+    )
+
+    horizon = today + timedelta(days=CINEMA_WEEK_DAYS_AHEAD)
+    day_urls = {}
+    for d in available_days:
+        try:
+            day_date = datetime.fromisoformat(d.get("Value", "")).date()
+        except Exception:
+            continue
+        if today <= day_date <= horizon:
+            day_urls[day_date] = urljoin(CHARLY_BASE, d.get("Url", ""))
+    # На случай если сегодняшний день почему-то не попал в AvailableDays —
+    # подстрахуемся: за него данные уже есть в base_model.
+    day_urls.setdefault(today, CHARLY_CINEMA_URL)
+
+    # canonical_id фильма -> агрегированные данные с сеансами по датам
+    movies: dict = {}
+
+    def process_items(items: list, day_date: date):
         for item in items:
-            movie = {}
-            try:
-                movie = item.get("Movie", {}) or {}
-                sessions = item.get("Sessions", []) or []
+            movie = item.get("Movie", {}) or {}
+            sessions = item.get("Sessions", []) or []
+            title = (movie.get("Name") or "").strip()
+            if not title:
+                continue
 
-                title = (movie.get("Name") or "").strip()
-                if not title:
-                    continue
+            schedule_info = movie.get("ScheduleInfo", {}) or {}
+            ticket_path = schedule_info.get("Url", "")
+            movie_url = urljoin(CHARLY_BASE, movie.get("Url", ""))
+            # Movie.Url содержит дату показа на конце (.../16-08-2026/), поэтому
+            # для объединения одного и того же фильма за разные дни используем
+            # ссылку на билетную страницу (она не зависит от даты), а если её
+            # вдруг нет — вырезаем дату из Url вручную.
+            canonical_id = ticket_path or re.sub(r"/\d{2}-\d{2}-\d{4}/?$", "/", movie.get("Url", "")) or movie_url
 
-                movie_url = urljoin(CHARLY_BASE, movie.get("Url", ""))
-
+            entry = movies.get(canonical_id)
+            if entry is None:
                 genres = [
                     g.get("Name", "") for g in (movie.get("Genres", {}) or {}).get("Links", [])
                     if g.get("Name")
@@ -814,47 +877,72 @@ async def parse_charly_cinema(session: aiohttp.ClientSession) -> List[Event]:
                 type_parts = [", ".join(genres)] if genres else []
                 if duration:
                     type_parts.append(duration)
-                event_type = " · ".join(p for p in type_parts if p)
+                entry = {
+                    "title": title,
+                    "url": movie_url,
+                    "event_type": " · ".join(p for p in type_parts if p),
+                    "age_rating": movie.get("AgeRestriction", ""),
+                    "buy_ticket_url": urljoin(CHARLY_BASE, ticket_path) if ticket_path else movie_url,
+                    "min_price": schedule_info.get("MinPrice"),
+                    "image_url": (movie.get("Poster", {}) or {}).get("Url"),
+                    "sessions_by_date": {},
+                }
+                movies[canonical_id] = entry
+            else:
+                mp = schedule_info.get("MinPrice")
+                if mp is not None and (entry["min_price"] is None or mp < entry["min_price"]):
+                    entry["min_price"] = mp
 
-                age_rating = movie.get("AgeRestriction", "")
+            times = [s.get("Time", "") for s in sessions if s.get("Time")]
+            if times:
+                entry["sessions_by_date"][day_date] = times
 
-                schedule_info = movie.get("ScheduleInfo", {}) or {}
-                # Прямая ссылка на страницу покупки билета на сайте —
-                # в отличие от afishagoroda.ru, тут это не JS-виджет,
-                # а обычный путь сайта, реально присутствующий в HTML.
-                ticket_path = schedule_info.get("Url", "")
-                buy_ticket_url = urljoin(CHARLY_BASE, ticket_path) if ticket_path else movie_url
+    for day_date, url in sorted(day_urls.items()):
+        if day_date == today:
+            model = base_model
+        else:
+            model = await _fetch_charly_day_model(session, url)
+            await asyncio.sleep(0.5)
+        if model is None:
+            continue
+        items = ((model.get("Schedule", {}) or {}).get("MovieWidget", {}) or {}).get("Items", []) or []
+        process_items(items, day_date)
 
-                min_price = schedule_info.get("MinPrice")
-                prices = f"от {int(min_price)} ₽" if min_price else ""
+    if not movies:
+        logger.info("charly cinema: на предстоящую неделю не нашлось фильмов в репертуаре")
+        return events
 
-                session_times = [s.get("Time", "") for s in sessions if s.get("Time")]
-                time_str = ", ".join(session_times)
+    for entry in movies.values():
+        sessions_by_date = entry["sessions_by_date"]
+        if not sessions_by_date:
+            continue
+        sorted_dates = sorted(sessions_by_date.keys())
 
-                image_url = (movie.get("Poster", {}) or {}).get("Url")
+        date_str = _format_cinema_date_range(sorted_dates)
+        time_str = "\n".join(
+            f"{d.day} {REVERSE_MONTH_MAP.get(d.month, '')}: {', '.join(sessions_by_date[d])}"
+            for d in sorted_dates
+        )
+        prices = f"от {int(entry['min_price'])} ₽" if entry["min_price"] else ""
 
-                event = Event(
-                    title=title,
-                    url=movie_url,
-                    category="cinema",
-                    event_type=event_type,
-                    date_str=today_str,
-                    parsed_date=today,
-                    time_str=time_str,
-                    location=place_address,
-                    prices=prices,
-                    age_rating=age_rating,
-                    hashtags=["#Кино", "#Таганрог", "#афиша"],
-                    buy_ticket_url=buy_ticket_url,
-                    image_url=image_url,
-                )
-                events.append(event)
-                logger.info(f"Фильм добавлен к отправке: {title} (сеансы: {time_str})")
-            except Exception as item_err:
-                logger.error(f"Ошибка при обработке фильма '{movie.get('Name', '?')}': {item_err}")
-                continue
-    except Exception as e:
-        logger.error(f"Ошибка при парсинге afisha.ru (кино, Чарли Мармелад): {e}")
+        event = Event(
+            title=entry["title"],
+            url=entry["url"],
+            category="cinema",
+            event_type=entry["event_type"],
+            date_str=date_str,
+            parsed_date=sorted_dates[0],
+            time_str=time_str,
+            location=place_address,
+            prices=prices,
+            age_rating=entry["age_rating"],
+            hashtags=["#Кино", "#Таганрог", "#афиша"],
+            buy_ticket_url=entry["buy_ticket_url"],
+            image_url=entry["image_url"],
+        )
+        events.append(event)
+        logger.info(f"Фильм добавлен к отправке: {entry['title']} (дней с сеансами: {len(sorted_dates)})")
+
     return events
 
 # ===================== ОТПРАВКА В TELEGRAM =====================
