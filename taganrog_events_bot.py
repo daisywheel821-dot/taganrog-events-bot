@@ -923,7 +923,7 @@ async def parse_charly_cinema(session: aiohttp.ClientSession) -> List[Event]:
                 entry = {
                     "title": title,
                     "url": movie_url,
-                    "event_type": " · ".join(p for p in type_parts if p),
+                    "event_type": "\n".join(p for p in type_parts if p),
                     "age_rating": movie.get("AgeRestriction", ""),
                     "buy_ticket_url": urljoin(CHARLY_BASE, ticket_path) if ticket_path else movie_url,
                     "min_price": schedule_info.get("MinPrice"),
