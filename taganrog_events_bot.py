@@ -742,6 +742,7 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
 # kinocharly.ru отдаёт пустую страницу простому парсеру (сайт на JS), поэтому
 # используем afisha.ru как рабочую альтернативу для того же кинотеатра.
 CHARLY_BASE = "https://www.afisha.ru"
+CHARLY_LISTING_URL = f"{CHARLY_BASE}/taganrog/cinema/"
 CHARLY_CINEMA_URL = f"{CHARLY_BASE}/taganrog/cinema/charli-marmelad-taganrog-9584/movie/"
 
 # Данные о расписании на странице не лежат в удобных CSS-классах (они
@@ -750,16 +751,39 @@ CHARLY_CINEMA_URL = f"{CHARLY_BASE}/taganrog/cinema/charli-marmelad-taganrog-958
 # в HTML. Это гораздо надёжнее для парсинга, чем гадать классы карточек.
 NRP_JSON_MARKER = "['root'] = "
 
+# Иногда afisha.ru вместо страницы отдаёт JS-прослойку "Один момент..."
+# (похоже на silent-SSO/автологин проверку от Rambler/Сбер ID — она должна
+# сама себя перезагрузить через JS, чего простой HTTP-клиент сделать не
+# может). На вид это разовая проверка сессии, а не постоянная блокировка,
+# поэтому пробуем: 1) подставить куки, которые видели у реальной успешно
+# загруженной страницы, 2) сделать "прогревочный" запрос на другую страницу
+# сайта, чтобы обзавестись куками сессии, 3) повторить запрос пару раз.
+CHARLY_COOKIES = {
+    "cookies_privacy_ok": "1",
+    "sberloyalty_bait_hidden": "1",
+}
+CHARLY_HEADERS = {
+    **HEADERS,
+    "Referer": CHARLY_LISTING_URL,
+}
+
 # Блок «Кино» в графике стоит только раз в неделю (по четвергам), поэтому
 # вместо сеансов на один день собираем расписание на всю предстоящую
 # неделю: сегодня + 6 дней вперёд.
 CINEMA_WEEK_DAYS_AHEAD = 6
 
-async def _fetch_charly_day_model(session: aiohttp.ClientSession, url: str) -> Optional[dict]:
+def _looks_like_charly_interstitial(html_text: str) -> bool:
+    """Отличает JS-прослойку "Один момент..." от реальной большой страницы
+    с данными — прослойка короткая и содержит характерный заголовок."""
+    return len(html_text) < 10000 and "Один момент" in html_text
+
+async def _fetch_charly_day_model(session: aiohttp.ClientSession, url: str, attempt: int = 1) -> Optional[dict]:
     """Загружает страницу репертуара кинотеатра на конкретный день и
     возвращает распарсенный словарь model из window.__nrp (или None при ошибке)."""
     try:
-        async with session.get(url, headers=HEADERS, timeout=15) as resp:
+        async with session.get(
+            url, headers=CHARLY_HEADERS, cookies=CHARLY_COOKIES, timeout=15
+        ) as resp:
             final_url = str(resp.url)
             if resp.status != 200:
                 logger.error(f"charly cinema: неожиданный статус {resp.status} для {url} (итоговый URL: {final_url})")
@@ -771,15 +795,23 @@ async def _fetch_charly_day_model(session: aiohttp.ClientSession, url: str) -> O
 
     idx = html_text.find(NRP_JSON_MARKER)
     if idx == -1:
-        # Диагностика: логируем куда реально привёл запрос (afisha.ru может
-        # редиректить дата-центровые IP на антибот-страницу/капчу), длину
-        # ответа и начало текста — чтобы понять, что именно вернул сервер,
-        # не имея возможности воспроизвести это из песочницы напрямую.
-        snippet = re.sub(r"\s+", " ", html_text[:500]).strip()
+        if _looks_like_charly_interstitial(html_text) and attempt < 3:
+            logger.info(
+                f"charly cinema: похоже на JS-прослойку 'Один момент...' на {url}, "
+                f"повторяем попытку {attempt + 1}/3 после паузы"
+            )
+            await asyncio.sleep(2 * attempt)
+            return await _fetch_charly_day_model(session, url, attempt=attempt + 1)
+
+        # Диагностика: логируем куда реально привёл запрос и ПОЛНЫЙ текст
+        # ответа (не обрезая) — чтобы можно было прочитать весь JS-скрипт
+        # заглушки и понять, воспроизводима ли его логика без браузера.
+        full_text = re.sub(r"[ \t]+", " ", html_text).strip()
         logger.error(
-            f"charly cinema: не найден блок window.__nrp на {url} (сайт мог измениться). "
-            f"Итоговый URL: {final_url}, длина ответа: {len(html_text)} симв. "
-            f"Начало ответа: {snippet}"
+            f"charly cinema: не найден блок window.__nrp на {url} после {attempt} попыток. "
+            f"Итоговый URL: {final_url}, длина ответа: {len(html_text)} симв.\n"
+            f"--- ПОЛНЫЙ ТЕКСТ ОТВЕТА НИЖЕ ---\n{full_text}\n"
+            f"--- КОНЕЦ ОТВЕТА ---"
         )
         return None
 
