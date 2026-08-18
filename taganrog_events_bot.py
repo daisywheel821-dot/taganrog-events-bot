@@ -947,8 +947,11 @@ async def parse_charly_cinema(session: aiohttp.ClientSession) -> List[Event]:
             model = await _fetch_charly_day_model(session, url)
             await asyncio.sleep(0.5)
         if model is None:
+            logger.warning(f"charly cinema: день {day_date} пропущен (не удалось получить данные)")
             continue
         items = ((model.get("Schedule", {}) or {}).get("MovieWidget", {}) or {}).get("Items", []) or []
+        titles_on_day = [(it.get("Movie", {}) or {}).get("Name", "?") for it in items]
+        logger.info(f"charly cinema: день {day_date} — найдено фильмов в ответе: {len(items)} ({', '.join(titles_on_day) or 'пусто'})")
         process_items(items, day_date)
 
     if not movies:
