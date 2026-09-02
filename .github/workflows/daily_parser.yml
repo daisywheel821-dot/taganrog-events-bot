@@ -23,7 +23,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.CHAT_ID }}
-          FORCE_BLOCK: cinema   # временно, для теста — потом можно убрать эту строку
+          FORCE_BLOCK: spa   # временно, для теста — потом можно убрать эту строку
         run: python taganrog_events_bot.py
       - name: Commit and push database
         run: |
