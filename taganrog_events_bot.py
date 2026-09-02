@@ -74,6 +74,8 @@ class Event:
     date_str: str = ""
     parsed_date: Optional[date] = None
     time_str: str = ""
+    work_hours: str = ""  # Режим работы (для "статичных" блоков вроде СПА/квестов —
+                           # отдельное поле, не смешиваем с time_str сеанса/показа.
     location: str = ""
     address: str = ""
     prices: str = ""
@@ -90,7 +92,21 @@ HEADERS_BY_CATEGORY = {
     "museum": "МУЗЕЙНАЯ АФИША ТАГАНРОГА",
     "concerts": "АФИША КОНЦЕРТОВ ТАГАНРОГА",
     "cinema": "АФИША КИНО ТАГАНРОГА",
+    "spa": "СПА И ТЕРМАЛЬНЫЕ КОМПЛЕКСЫ ТАГАНРОГА",
 }
+
+# Подпись строки цены зависит от категории: у СПА это не "билет", а просто цена.
+PRICE_LABEL_BY_CATEGORY = {
+    "spa": "Цена:",
+}
+DEFAULT_PRICE_LABEL = "Стоимость билета:"
+
+# Подпись кнопки со ссылкой зависит от категории: у СПА не продают билет,
+# а ведут на страницу объекта с актуальными условиями.
+TICKET_BUTTON_LABEL_BY_CATEGORY = {
+    "spa": "Подробнее",
+}
+DEFAULT_TICKET_BUTTON_LABEL = "Купить билет"
 
 # ===================== БАЗА ДАННЫХ SQLite =====================
 def init_db():
@@ -225,8 +241,10 @@ def split_address_lines(text: str) -> List[str]:
     """
     parts = [p.strip() for p in text.split(",") if p.strip()]
     merged: List[str] = []
+    # Номер дома: цифры, опционально с литерой ("2А", "104") и/или дробью ("104/1").
+    house_number_re = re.compile(r'\d+[А-Яа-яA-Za-z]?(?:/\d+[А-Яа-яA-Za-z]?)?')
     for part in parts:
-        if merged and re.fullmatch(r'[\d/]+', part):
+        if merged and house_number_re.fullmatch(part):
             merged[-1] = f"{merged[-1]}, {part}"
         else:
             merged.append(part)
@@ -261,8 +279,11 @@ def format_event_post(event: Event) -> str:
         lines.append(f"Дата: {html.escape(event.date_str)}")
     if event.time_str:
         lines.append(f"Время: {html.escape(event.time_str)}")
+    if event.work_hours:
+        lines.append(f"Режим работы: {html.escape(event.work_hours)}")
     if event.prices:
-        lines.append("Стоимость билета:")
+        price_label = PRICE_LABEL_BY_CATEGORY.get(event.category, DEFAULT_PRICE_LABEL)
+        lines.append(price_label)
         lines.append(html.escape(event.prices))
         lines.append("")
         
@@ -991,13 +1012,218 @@ async def parse_charly_cinema(session: aiohttp.ClientSession) -> List[Event]:
 
     return events
 
+# ===================== ПАРСИНГ СПА (ГРИНВИЧ-ПАРК, ГОЛДЕН ХОРС, ЛАЗУРНЫЙ) =====================
+# Блок "Отдых" стоит по средам. Модель отличается от остальных: это не
+# разовые события с датами, а постоянно действующие объекты-напоминания.
+# Публикуем ВСЕ ТРИ сразу каждую среду, дедуп по датам не нужен (у SPA его
+# просто нет — parsed_date остаётся None, сортировка по времени тоже не
+# участвует в приоритете, объекты идут в фиксированном порядке).
+
+GREENWICH_URL = "https://www.vsemitut.ru/spa/greenwich/"
+GREENWICH_ADDRESS = "ул. Адмирала Крюйса, 2А"
+GREENWICH_PHONE = "8 (8634) 31-42-42"
+GREENWICH_HOURS = "Пн–Ср, Вс: 10:00–22:00. Пт–Сб: 10:00–24:00"
+
+GOLDEN_HORSE_URL = "https://goldenhorse161.ru/aquazone/"
+# Сайт /aquazone/ адрес не публикует — взят со страницы контактов гостиницы
+# (goldenhorse161.ru/hotel/contacts/) и подтверждён Яндекс.Картами.
+GOLDEN_HORSE_ADDRESS = (
+    "Ростовская обл., Неклиновский р-н, с. Новобессергеневка, "
+    "Конюшенный проезд, 102"
+)
+GOLDEN_HORSE_LANDMARK_NOTE = "Ориентир для проезда: Мариупольское шоссе, 73"
+GOLDEN_HORSE_PHONE = "+7 (988) 952-67-76"
+GOLDEN_HORSE_PRICE_RE = re.compile(
+    r"(\d[\d\s]{2,6})\s*рубл[а-я]*\s*по\s*будн[а-я]*\s*и\s*(\d[\d\s]{2,6})\s*рубл[а-я]*\s*по\s*выходн[а-я]*",
+    re.IGNORECASE,
+)
+GOLDEN_HORSE_HOURS_RE = re.compile(
+    r"(Пн[-–]Вс|ежедневно)[^\n.]{0,40}\d{1,2}:\d{2}[^\n.]{0,20}\d{1,2}:\d{2}",
+    re.IGNORECASE,
+)
+
+LAZURNY_MAIN_URL = "https://akvalazur.ru/main"
+LAZURNY_PRICE_URL = "https://akvalazur.ru/price"  # цены картинкой, текстом не парсятся
+LAZURNY_ADDRESS = "ул. Адмирала Крюйса, 6"
+LAZURNY_PHONE = "+7 (900) 128-08-88"
+LAZURNY_HOURS = "ежедневно с 10:00 до 20:00"
+
+SPA_HASHTAGS = ["#СПА", "#Таганрог", "#афиша"]
+
+
+async def parse_greenwich(session: aiohttp.ClientSession) -> Optional[Event]:
+    try:
+        async with session.get(GREENWICH_URL, headers=HEADERS, timeout=15) as resp:
+            if resp.status != 200:
+                logger.warning(f"Гринвич-Парк: неожиданный статус {resp.status}")
+                return None
+            html_text = await resp.text()
+    except Exception as e:
+        logger.error(f"Гринвич-Парк: ошибка запроса: {e}")
+        return None
+
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    title = "Термальный комплекс «Гринвич-Парк»"
+    h1 = soup.find("h1")
+    if h1:
+        name_span = h1.find("span", attrs={"itemprop": "name"})
+        if name_span and name_span.get_text(strip=True):
+            title = name_span.get_text(strip=True)
+    else:
+        logger.warning("Гринвич-Парк: не нашёл h1 с itemprop=name, использую дефолтное название")
+
+    price = None
+    price_node = soup.find(attrs={"itemprop": "price"})
+    if price_node:
+        price = price_node.get_text(strip=True)
+    else:
+        logger.warning("Гринвич-Парк: не нашёл itemprop=price")
+
+    address = GREENWICH_ADDRESS
+    addr_value = soup.select_one(".item-address .item-value")
+    if addr_value and addr_value.get_text(strip=True):
+        address = addr_value.get_text(strip=True)
+    else:
+        logger.warning("Гринвич-Парк: не нашёл .item-address .item-value, использую захардкоженный адрес")
+
+    description = ""
+    og_desc = soup.find("meta", attrs={"property": "og:description"})
+    if og_desc and og_desc.get("content"):
+        description = og_desc["content"].strip()
+
+    image_url = None
+    og_image = soup.find("meta", attrs={"property": "og:image"})
+    if og_image and og_image.get("content"):
+        image_url = urljoin(GREENWICH_URL, og_image["content"])
+
+    return Event(
+        title=title,
+        url=GREENWICH_URL,
+        category="spa",
+        event_type=description,
+        work_hours=GREENWICH_HOURS,
+        address=address,
+        prices=price or "",
+        phones=[GREENWICH_PHONE],
+        hashtags=SPA_HASHTAGS,
+        buy_ticket_url=GREENWICH_URL,
+        image_url=image_url,
+    )
+
+
+async def parse_golden_horse(session: aiohttp.ClientSession) -> Optional[Event]:
+    try:
+        async with session.get(GOLDEN_HORSE_URL, headers=HEADERS, timeout=15) as resp:
+            if resp.status != 200:
+                logger.warning(f"Голден Хорс: неожиданный статус {resp.status}")
+                return None
+            html_text = await resp.text()
+    except Exception as e:
+        logger.error(f"Голден Хорс: ошибка запроса: {e}")
+        return None
+
+    soup = BeautifulSoup(html_text, "html.parser")
+    body_text = re.sub(r"\s+", " ", soup.get_text(" "))
+
+    price_text = ""
+    m = GOLDEN_HORSE_PRICE_RE.search(body_text)
+    if m:
+        price_text = f"{m.group(1).strip()} ₽ по будням, {m.group(2).strip()} ₽ по выходным и праздникам"
+    else:
+        logger.warning("Голден Хорс: не нашёл цену по регулярке — проверить формулировку на странице")
+
+    hours_text = ""
+    m2 = GOLDEN_HORSE_HOURS_RE.search(body_text)
+    if m2:
+        hours_text = m2.group(0).strip()
+    else:
+        logger.warning("Голден Хорс: не нашёл режим работы по регулярке")
+
+    image_url = None
+    og_image = soup.find("meta", attrs={"property": "og:image"})
+    if og_image and og_image.get("content"):
+        image_url = urljoin(GOLDEN_HORSE_URL, og_image["content"])
+
+    return Event(
+        title="Аквазона «Голден Хорс»",
+        url=GOLDEN_HORSE_URL,
+        category="spa",
+        event_type=f"Аквазона под открытым небом в загородном клубе. {GOLDEN_HORSE_LANDMARK_NOTE}.",
+        work_hours=hours_text,
+        address=GOLDEN_HORSE_ADDRESS,
+        prices=price_text,
+        phones=[GOLDEN_HORSE_PHONE],
+        hashtags=SPA_HASHTAGS,
+        buy_ticket_url=GOLDEN_HORSE_URL,
+        image_url=image_url,
+    )
+
+
+async def parse_lazurny(session: aiohttp.ClientSession) -> Optional[Event]:
+    try:
+        async with session.get(LAZURNY_MAIN_URL, headers=HEADERS, timeout=15) as resp:
+            if resp.status != 200:
+                logger.warning(f"Лазурный: неожиданный статус {resp.status}")
+                return None
+            html_text = await resp.text()
+    except Exception as e:
+        logger.error(f"Лазурный: ошибка запроса: {e}")
+        return None
+
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    description = "Аквапарк «Лазурный» в Таганроге."
+    og_desc = soup.find("meta", attrs={"property": "og:description"})
+    if og_desc and og_desc.get("content"):
+        description = og_desc["content"].strip()
+    else:
+        logger.warning("Лазурный: не нашёл og:description на /main")
+
+    image_url = None
+    og_image = soup.find("meta", attrs={"property": "og:image"})
+    if og_image and og_image.get("content"):
+        image_url = urljoin(LAZURNY_MAIN_URL, og_image["content"])
+
+    # Цены на /price — картинка-меню, текстом не парсятся. Даём ссылку на
+    # страницу с тарифами прямо в тексте поста.
+    prices_note = f"Актуальные тарифы (в виде картинки-меню): {LAZURNY_PRICE_URL}"
+
+    return Event(
+        title="Аквапарк «Лазурный»",
+        url=LAZURNY_MAIN_URL,
+        category="spa",
+        event_type=description,
+        work_hours=LAZURNY_HOURS,
+        address=LAZURNY_ADDRESS,
+        prices=prices_note,
+        phones=[LAZURNY_PHONE],
+        hashtags=SPA_HASHTAGS,
+        buy_ticket_url=LAZURNY_MAIN_URL,
+        image_url=image_url,
+    )
+
+
+async def parse_spa_block(session: aiohttp.ClientSession) -> List[Event]:
+    """Собирает все три СПА-объекта. Один упавший источник не блокирует
+    остальные — публикуем всё, что удалось собрать."""
+    results = await asyncio.gather(
+        parse_greenwich(session),
+        parse_golden_horse(session),
+        parse_lazurny(session),
+    )
+    events = [e for e in results if e is not None]
+    logger.info(f"Блок СПА: собрано {len(events)} из 3 объектов")
+    return events
+
 # ===================== ОТПРАВКА В TELEGRAM =====================
 async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: aiohttp.ClientSession):
     text = format_event_post(event)
     
     keyboard = []
     if event.buy_ticket_url:
-        keyboard.append([InlineKeyboardButton("Купить билет", url=event.buy_ticket_url)])
+        button_label = TICKET_BUTTON_LABEL_BY_CATEGORY.get(event.category, DEFAULT_TICKET_BUTTON_LABEL)
+        keyboard.append([InlineKeyboardButton(button_label, url=event.buy_ticket_url)])
     if event.category == "concerts":
         keyboard.append([InlineKeyboardButton("Бонусная программа", url=AFISHAGORODA_BONUS_URL)])
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
@@ -1042,6 +1268,7 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
 WEEKDAY_BLOCKS = {
     0: "museum",
     1: "concerts",
+    2: "spa",
     3: "cinema",
 }
 
@@ -1053,6 +1280,8 @@ async def run_block(block_name: str, session: aiohttp.ClientSession) -> List[Eve
         return await parse_afishagoroda_concerts(session)
     elif block_name == "cinema":
         return await parse_charly_cinema(session)
+    elif block_name == "spa":
+        return await parse_spa_block(session)
     else:
         logger.error(f"Неизвестный блок: {block_name}")
         return []
@@ -1071,7 +1300,7 @@ async def main():
         logger.error("Ошибка: TELEGRAM_USER_ID должен быть числовым значением.")
         return
 
-    # FORCE_BLOCK=museum (или concerts, и т.д.) запускает конкретный блок
+    # FORCE_BLOCK=museum (или concerts, spa и т.д.) запускает конкретный блок
     # вручную, независимо от дня недели — удобно для тестирования.
     force_block = os.environ.get("FORCE_BLOCK", "").strip().lower()
     today_weekday = date.today().weekday()
@@ -1090,7 +1319,10 @@ async def main():
         logger.info("Начинаем сбор событий...")
         events = await run_block(block_name, session)
         
-        # Строгая хронологическая сортировка (от ранних к поздним)
+        # Строгая хронологическая сортировка (от ранних к поздним).
+        # У СПА parsed_date всегда None -> они уходят в конец списка по
+        # ключу сортировки, но т.к. блок СПА никогда не смешивается с
+        # другими категориями в одном прогоне, порядок между ними не важен.
         events.sort(key=lambda x: (x.parsed_date or date.max, x.time_str))
         
         logger.info(f"Найдено событий для отправки: {len(events)}")
