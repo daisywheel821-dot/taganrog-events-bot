@@ -1023,6 +1023,22 @@ GREENWICH_URL = "https://www.vsemitut.ru/spa/greenwich/"
 GREENWICH_ADDRESS = "ул. Адмирала Крюйса, 2А"
 GREENWICH_PHONE = "8 (8634) 31-42-42"
 GREENWICH_HOURS = "Пн–Ср, Вс: 10:00–22:00. Пт–Сб: 10:00–24:00"
+# Цена на странице указана уже со скидкой, но сама скидка (-40%) нигде на
+# странице явно не подписана рядом с числом — фиксируем её отдельно, чтобы
+# в посте было понятно "от 1170 ₽ со скидкой -40%", а не просто голая цифра.
+GREENWICH_DISCOUNT_LABEL = "-40%"
+GREENWICH_FALLBACK_PRICE = "от 1170 ₽"
+# Реальное фото парка (прислано Натальей), а не баннер агрегатора.
+GREENWICH_PHOTO_URL = "https://www.vsemitut.ru/upload/webp/resize_cache/iblock/75c/900_510_0/kot4cnbv4puuhba8tw0tfj6wkw3gy9s1.webp"
+
+# Купальный сезон — период, когда открыты неотапливаемые аквазоны/аквапарки
+# без подогрева воды (в отличие от Гринвич-Парка, который работает круглый
+# год благодаря подогреву). Вне этих месяцев: Лазурный не публикуем вовсе,
+# у Голден Хорс переключаемся с аквазоны на конный клуб/ресторан/отель.
+SWIM_SEASON_MONTHS = {6, 7, 8}
+
+def is_swim_season() -> bool:
+    return date.today().month in SWIM_SEASON_MONTHS
 
 GOLDEN_HORSE_URL = "https://goldenhorse161.ru/aquazone/"
 # Сайт /aquazone/ адрес не публикует — взят со страницы контактов гостиницы
@@ -1047,6 +1063,11 @@ LAZURNY_PRICE_URL = "https://akvalazur.ru/price"  # цены картинкой,
 LAZURNY_ADDRESS = "ул. Адмирала Крюйса, 6"
 LAZURNY_PHONE = "+7 (900) 128-08-88"
 LAZURNY_HOURS = "ежедневно с 10:00 до 20:00"
+
+# Вне купального сезона аквазона Голден Хорс закрыта, но конный клуб,
+# ресторан и отель на той же территории работают круглый год — на это
+# время переключаем контент по Голден Хорс на их сайт.
+GOLDEN_HORSE_EQUESTRIAN_URL = "https://kskgoldenhorse.ru/"
 
 SPA_HASHTAGS = ["#СПА", "#Таганрог", "#афиша"]
 
@@ -1073,12 +1094,13 @@ async def parse_greenwich(session: aiohttp.ClientSession) -> Optional[Event]:
     else:
         logger.warning("Гринвич-Парк: не нашёл h1 с itemprop=name, использую дефолтное название")
 
-    price = None
     price_node = soup.find(attrs={"itemprop": "price"})
     if price_node:
-        price = price_node.get_text(strip=True)
+        raw_price = price_node.get_text(strip=True)
+        price = f"от {raw_price} со скидкой {GREENWICH_DISCOUNT_LABEL}"
     else:
-        logger.warning("Гринвич-Парк: не нашёл itemprop=price")
+        logger.warning("Гринвич-Парк: не нашёл itemprop=price, использую захардкоженную цену")
+        price = f"{GREENWICH_FALLBACK_PRICE} со скидкой {GREENWICH_DISCOUNT_LABEL}"
 
     address = GREENWICH_ADDRESS
     addr_value = soup.select_one(".item-address .item-value")
@@ -1092,10 +1114,12 @@ async def parse_greenwich(session: aiohttp.ClientSession) -> Optional[Event]:
     if og_desc and og_desc.get("content"):
         description = og_desc["content"].strip()
 
-    image_url = None
-    og_image = soup.find("meta", attrs={"property": "og:image"})
-    if og_image and og_image.get("content"):
-        image_url = urljoin(GREENWICH_URL, og_image["content"])
+    # Фото со страницы vsemitut.ru — это баннер сайта-агрегатора (со скидкой
+    # на билет), а не сам парк, поэтому берём заранее заданное реальное фото
+    # вместо og:image со страницы.
+    image_url = GREENWICH_PHOTO_URL or None
+    if not image_url:
+        logger.warning("Гринвич-Парк: GREENWICH_PHOTO_URL не задан — пост уйдёт без фото")
 
     return Event(
         title=title,
@@ -1204,16 +1228,78 @@ async def parse_lazurny(session: aiohttp.ClientSession) -> Optional[Event]:
     )
 
 
-async def parse_spa_block(session: aiohttp.ClientSession) -> List[Event]:
-    """Собирает все три СПА-объекта. Один упавший источник не блокирует
-    остальные — публикуем всё, что удалось собрать."""
-    results = await asyncio.gather(
-        parse_greenwich(session),
-        parse_golden_horse(session),
-        parse_lazurny(session),
+async def parse_golden_horse_equestrian(session: aiohttp.ClientSession) -> Optional[Event]:
+    """Межсезонный контент по Голден Хорс: аквазона закрыта, но конный клуб,
+    ресторан и отель на той же территории работают круглый год."""
+    try:
+        async with session.get(GOLDEN_HORSE_EQUESTRIAN_URL, headers=HEADERS, timeout=15) as resp:
+            if resp.status != 200:
+                logger.warning(f"Голден Хорс (конный клуб): неожиданный статус {resp.status}")
+                return None
+            html_text = await resp.text()
+    except Exception as e:
+        logger.error(f"Голден Хорс (конный клуб): ошибка запроса: {e}")
+        return None
+
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    description = "Конный клуб, ресторан и отель в загородном клубе «Голден Хорс» — работают круглый год."
+    og_desc = soup.find("meta", attrs={"property": "og:description"})
+    if og_desc and og_desc.get("content"):
+        description = og_desc["content"].strip()
+    else:
+        logger.warning("Голден Хорс (конный клуб): не нашёл og:description на kskgoldenhorse.ru")
+
+    image_url = None
+    og_image = soup.find("meta", attrs={"property": "og:image"})
+    if og_image and og_image.get("content"):
+        image_url = urljoin(GOLDEN_HORSE_EQUESTRIAN_URL, og_image["content"])
+    else:
+        logger.warning("Голден Хорс (конный клуб): не нашёл og:image на kskgoldenhorse.ru")
+
+    # Общий телефон загородного клуба (тот же объект, тот же контакт-центр,
+    # что и у аквазоны) — используем его же как fallback.
+    phone_candidates = extract_targeted_phones(soup.get_text(separator=" "))
+    phones = phone_candidates or [GOLDEN_HORSE_PHONE]
+
+    return Event(
+        title="Загородный клуб «Голден Хорс»: конный клуб, ресторан, отель",
+        url=GOLDEN_HORSE_EQUESTRIAN_URL,
+        category="spa",
+        event_type=description,
+        work_hours="Круглый год",
+        address=GOLDEN_HORSE_ADDRESS,
+        phones=phones,
+        hashtags=SPA_HASHTAGS,
+        buy_ticket_url=GOLDEN_HORSE_EQUESTRIAN_URL,
+        image_url=image_url,
     )
+
+
+async def parse_spa_block(session: aiohttp.ClientSession) -> List[Event]:
+    """Собирает СПА-объекты с учётом купального сезона (июнь–август):
+    - Гринвич-Парк — работает круглый год (подогрев), публикуется всегда.
+    - Лазурный — нет подогрева, вне сезона закрыт целиком, не публикуем.
+    - Голден Хорс — в сезон аквазона, вне сезона конный клуб/ресторан/отель
+      (та же территория, но другой контент, круглогодичный).
+    Один упавший источник не блокирует остальные.
+    """
+    tasks = [parse_greenwich(session)]
+
+    if is_swim_season():
+        logger.info("СПА: купальный сезон — публикуем аквазону Голден Хорс и Лазурный")
+        tasks.append(parse_golden_horse(session))
+        tasks.append(parse_lazurny(session))
+    else:
+        logger.info(
+            "СПА: не купальный сезон — Лазурный пропускаем, "
+            "Голден Хорс переключаем на конный клуб/ресторан/отель"
+        )
+        tasks.append(parse_golden_horse_equestrian(session))
+
+    results = await asyncio.gather(*tasks)
     events = [e for e in results if e is not None]
-    logger.info(f"Блок СПА: собрано {len(events)} из 3 объектов")
+    logger.info(f"Блок СПА: собрано {len(events)} объектов")
     return events
 
 # ===================== ОТПРАВКА В TELEGRAM =====================
