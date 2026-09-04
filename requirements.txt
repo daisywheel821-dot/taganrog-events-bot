@@ -4,3 +4,11 @@ beautifulsoup4==4.12.2
 lxml==4.9.3
 aiohttp==3.9.1
 python-dotenv==1.0.0
+
+# Явная фиксация транзитивных зависимостей python-telegram-bot==20.3.
+# Без этого pip иногда подтягивает более новый anyio (4.x), несовместимый
+# с httpx/httpcore той эпохи — падает с
+# "AttributeError: module 'anyio' has no attribute 'abc'" при импорте telegram.
+httpx==0.24.1
+httpcore==0.17.3
+anyio==3.7.1
