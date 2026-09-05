@@ -1071,7 +1071,10 @@ LAZURNY_HOURS = "ежедневно с 10:00 до 20:00"
 # время переключаем контент по Голден Хорс на их сайт.
 GOLDEN_HORSE_EQUESTRIAN_URL = "https://kskgoldenhorse.ru/"
 
-SPA_HASHTAGS = ["#СПА", "#Таганрог", "#афиша"]
+GREENWICH_HASHTAGS = ["#СПА", "#ГринвичПарк", "#Таганрог", "#афиша"]
+GOLDEN_HORSE_AQUAZONE_HASHTAGS = ["#Аквазона", "#ГолденХорс", "#Таганрог", "#афиша"]
+LAZURNY_HASHTAGS = ["#Аквапарк", "#Лазурный", "#Таганрог", "#афиша"]
+GOLDEN_HORSE_EQUESTRIAN_HASHTAGS = ["#КонныйКлуб", "#ГолденХорс", "#Таганрог", "#афиша"]
 
 
 async def parse_greenwich(session: aiohttp.ClientSession) -> Optional[Event]:
@@ -1132,7 +1135,7 @@ async def parse_greenwich(session: aiohttp.ClientSession) -> Optional[Event]:
         address=address,
         prices=price or "",
         phones=[GREENWICH_PHONE],
-        hashtags=SPA_HASHTAGS,
+        hashtags=GREENWICH_HASHTAGS,
         buy_ticket_url=GREENWICH_URL,
         image_url=image_url,
     )
@@ -1180,7 +1183,7 @@ async def parse_golden_horse(session: aiohttp.ClientSession) -> Optional[Event]:
         address=GOLDEN_HORSE_ADDRESS,
         prices=price_text,
         phones=[GOLDEN_HORSE_PHONE],
-        hashtags=SPA_HASHTAGS,
+        hashtags=GOLDEN_HORSE_AQUAZONE_HASHTAGS,
         buy_ticket_url=GOLDEN_HORSE_URL,
         image_url=image_url,
     )
@@ -1224,7 +1227,7 @@ async def parse_lazurny(session: aiohttp.ClientSession) -> Optional[Event]:
         address=LAZURNY_ADDRESS,
         prices=prices_note,
         phones=[LAZURNY_PHONE],
-        hashtags=SPA_HASHTAGS,
+        hashtags=LAZURNY_HASHTAGS,
         buy_ticket_url=LAZURNY_MAIN_URL,
         image_url=image_url,
     )
@@ -1282,7 +1285,7 @@ async def parse_golden_horse_equestrian(session: aiohttp.ClientSession, attempt:
         work_hours="Круглый год",
         address=GOLDEN_HORSE_ADDRESS,
         phones=phones,
-        hashtags=SPA_HASHTAGS,
+        hashtags=GOLDEN_HORSE_EQUESTRIAN_HASHTAGS,
         buy_ticket_url=GOLDEN_HORSE_EQUESTRIAN_URL,
         image_url=image_url,
     )
