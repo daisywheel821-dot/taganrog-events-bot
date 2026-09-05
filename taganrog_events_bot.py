@@ -1072,14 +1072,31 @@ LAZURNY_HOURS = "ежедневно с 10:00 до 20:00"
 GOLDEN_HORSE_EQUESTRIAN_URL = "https://kskgoldenhorse.ru/"
 # kskgoldenhorse.ru стабильно не отвечает на запросы с IP GitHub Actions
 # (таймаут даже при повторной попытке) — судя по всему, сайт блокирует
-# дата-центровые адреса. Пока это не решено, используем заранее заданные
-# описание и фото как fallback, чтобы пост не пропадал каждую межсезонную
-# среду. TODO: Наталья пришлёт текст и ссылку на фото — вписать сюда.
+# дата-центровые адреса. Текст и фото ниже присланы Натальей напрямую и
+# используются как fallback (а также как основа при живом ответе сайта,
+# если он вдруг снова заработает), чтобы пост не пропадал каждую
+# межсезонную среду.
 GOLDEN_HORSE_EQUESTRIAN_FALLBACK_DESCRIPTION = (
-    "Конный клуб, ресторан и отель в загородном клубе «Голден Хорс» — "
-    "работают круглый год."
+    "«Голден Хорс» — конный клуб европейского уровня, соответствующий "
+    "современным мировым стандартам, расположенный на окраине Таганрога. "
+    "Комплекс имеет развитую инфраструктуру и включает в себя "
+    "мульти-сезонные конюшни, крытые поля, тренировочные площадки, "
+    "ресторан и гостиницу. В клубе ведут занятия опытные и "
+    "квалифицированные тренеры. Работаем по предварительной записи."
 )
-GOLDEN_HORSE_EQUESTRIAN_FALLBACK_PHOTO_URL = ""
+GOLDEN_HORSE_EQUESTRIAN_FALLBACK_PHOTO_URL = (
+    "https://www.vsemitut.ru/upload/iblock/f91/q27rmuithzqnrtk3nrdl6fa375qxg7w3.png"
+)
+# Часы работы, телефон и цены сайт нигде текстом не парсятся так же удобно,
+# как og:description/og:image, — используем как и остальные стабильные
+# факты по СПА-объектам: захардкожено один раз, поправить вручную при
+# изменении.
+GOLDEN_HORSE_EQUESTRIAN_HOURS = "Ежедневно с 9:00 до 18:00 (по предварительной записи)"
+GOLDEN_HORSE_EQUESTRIAN_PHONE = "8 (928) 622-81-18"
+GOLDEN_HORSE_EQUESTRIAN_PRICES = (
+    "Разовое занятие верховой ездой: от 2 300 ₽\n"
+    "Аренда лошади для фотосессии: 6 000 ₽ / 45 мин"
+)
 
 GREENWICH_HASHTAGS = ["#СПА", "#ГринвичПарк", "#Таганрог", "#афиша"]
 GOLDEN_HORSE_AQUAZONE_HASHTAGS = ["#Аквазона", "#ГолденХорс", "#Таганрог", "#афиша"]
@@ -1243,15 +1260,16 @@ async def parse_lazurny(session: aiohttp.ClientSession) -> Optional[Event]:
     )
 
 
-def _build_golden_horse_equestrian_event(description: str, image_url: Optional[str], phones: List[str]) -> Event:
+def _build_golden_horse_equestrian_event(description: str, image_url: Optional[str]) -> Event:
     return Event(
         title="Загородный клуб «Голден Хорс»: конный клуб, ресторан, отель",
         url=GOLDEN_HORSE_EQUESTRIAN_URL,
         category="spa",
         event_type=description,
-        work_hours="Круглый год",
+        work_hours=GOLDEN_HORSE_EQUESTRIAN_HOURS,
         address=GOLDEN_HORSE_ADDRESS,
-        phones=phones,
+        prices=GOLDEN_HORSE_EQUESTRIAN_PRICES,
+        phones=[GOLDEN_HORSE_EQUESTRIAN_PHONE],
         hashtags=GOLDEN_HORSE_EQUESTRIAN_HASHTAGS,
         buy_ticket_url=GOLDEN_HORSE_EQUESTRIAN_URL,
         image_url=image_url,
@@ -1264,8 +1282,9 @@ async def parse_golden_horse_equestrian(session: aiohttp.ClientSession, attempt:
     Сайт kskgoldenhorse.ru отвечает медленнее остальных — таймаут увеличен
     до 30 секунд, при неудаче делаем одну повторную попытку. Если сайт
     так и не ответил (похоже на блокировку дата-центровых IP GitHub
-    Actions) — публикуем пост всё равно, с заранее заданным описанием и
-    фото, чтобы среда без поста не оставалась."""
+    Actions) — публикуем пост всё равно, с присланным текстом и фото.
+    Часы работы, телефон и цены на этот объект захардкожены всегда (как и
+    у остальных СПА-объектов) — сайт их удобно для парсинга не отдаёт."""
     try:
         async with session.get(
             GOLDEN_HORSE_EQUESTRIAN_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=30)
@@ -1278,7 +1297,6 @@ async def parse_golden_horse_equestrian(session: aiohttp.ClientSession, attempt:
                 return _build_golden_horse_equestrian_event(
                     GOLDEN_HORSE_EQUESTRIAN_FALLBACK_DESCRIPTION,
                     GOLDEN_HORSE_EQUESTRIAN_FALLBACK_PHOTO_URL or None,
-                    [GOLDEN_HORSE_PHONE],
                 )
             html_text = await resp.text()
     except Exception as e:
@@ -1291,12 +1309,11 @@ async def parse_golden_horse_equestrian(session: aiohttp.ClientSession, attempt:
             return await parse_golden_horse_equestrian(session, attempt=attempt + 1)
         logger.warning(
             "Голден Хорс (конный клуб): сайт не ответил после всех попыток — "
-            "публикуем с заранее заданным описанием/фото (fallback)"
+            "публикуем с присланным описанием/фото (fallback)"
         )
         return _build_golden_horse_equestrian_event(
             GOLDEN_HORSE_EQUESTRIAN_FALLBACK_DESCRIPTION,
             GOLDEN_HORSE_EQUESTRIAN_FALLBACK_PHOTO_URL or None,
-            [GOLDEN_HORSE_PHONE],
         )
 
     soup = BeautifulSoup(html_text, "html.parser")
@@ -1306,21 +1323,16 @@ async def parse_golden_horse_equestrian(session: aiohttp.ClientSession, attempt:
     if og_desc and og_desc.get("content"):
         description = og_desc["content"].strip()
     else:
-        logger.warning("Голден Хорс (конный клуб): не нашёл og:description на kskgoldenhorse.ru")
+        logger.warning("Голден Хорс (конный клуб): не нашёл og:description на kskgoldenhorse.ru, использую присланный текст")
 
     image_url = GOLDEN_HORSE_EQUESTRIAN_FALLBACK_PHOTO_URL or None
     og_image = soup.find("meta", attrs={"property": "og:image"})
     if og_image and og_image.get("content"):
         image_url = urljoin(GOLDEN_HORSE_EQUESTRIAN_URL, og_image["content"])
     else:
-        logger.warning("Голден Хорс (конный клуб): не нашёл og:image на kskgoldenhorse.ru")
+        logger.warning("Голден Хорс (конный клуб): не нашёл og:image на kskgoldenhorse.ru, использую присланное фото")
 
-    # Общий телефон загородного клуба (тот же объект, тот же контакт-центр,
-    # что и у аквазоны) — используем его же как fallback.
-    phone_candidates = extract_targeted_phones(soup.get_text(separator=" "))
-    phones = phone_candidates or [GOLDEN_HORSE_PHONE]
-
-    return _build_golden_horse_equestrian_event(description, image_url, phones)
+    return _build_golden_horse_equestrian_event(description, image_url)
 
 
 async def parse_spa_block(session: aiohttp.ClientSession) -> List[Event]:
