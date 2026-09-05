@@ -1230,17 +1230,27 @@ async def parse_lazurny(session: aiohttp.ClientSession) -> Optional[Event]:
     )
 
 
-async def parse_golden_horse_equestrian(session: aiohttp.ClientSession) -> Optional[Event]:
+async def parse_golden_horse_equestrian(session: aiohttp.ClientSession, attempt: int = 1) -> Optional[Event]:
     """Межсезонный контент по Голден Хорс: аквазона закрыта, но конный клуб,
-    ресторан и отель на той же территории работают круглый год."""
+    ресторан и отель на той же территории работают круглый год.
+    Сайт kskgoldenhorse.ru отвечает медленнее остальных — таймаут увеличен
+    до 30 секунд, при неудаче делаем одну повторную попытку."""
     try:
-        async with session.get(GOLDEN_HORSE_EQUESTRIAN_URL, headers=HEADERS, timeout=15) as resp:
+        async with session.get(
+            GOLDEN_HORSE_EQUESTRIAN_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=30)
+        ) as resp:
             if resp.status != 200:
                 logger.warning(f"Голден Хорс (конный клуб): неожиданный статус {resp.status}")
                 return None
             html_text = await resp.text()
     except Exception as e:
-        logger.error(f"Голден Хорс (конный клуб): ошибка запроса: {e}")
+        # str(e) у asyncio.TimeoutError обычно пустой — добавляем тип
+        # исключения в лог, иначе причина не читается вообще.
+        logger.error(f"Голден Хорс (конный клуб): ошибка запроса ({type(e).__name__}): {e}")
+        if attempt < 2:
+            logger.info(f"Голден Хорс (конный клуб): повторная попытка {attempt + 1}/2 после паузы")
+            await asyncio.sleep(3)
+            return await parse_golden_horse_equestrian(session, attempt=attempt + 1)
         return None
 
     soup = BeautifulSoup(html_text, "html.parser")
