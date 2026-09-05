@@ -1070,6 +1070,16 @@ LAZURNY_HOURS = "ежедневно с 10:00 до 20:00"
 # ресторан и отель на той же территории работают круглый год — на это
 # время переключаем контент по Голден Хорс на их сайт.
 GOLDEN_HORSE_EQUESTRIAN_URL = "https://kskgoldenhorse.ru/"
+# kskgoldenhorse.ru стабильно не отвечает на запросы с IP GitHub Actions
+# (таймаут даже при повторной попытке) — судя по всему, сайт блокирует
+# дата-центровые адреса. Пока это не решено, используем заранее заданные
+# описание и фото как fallback, чтобы пост не пропадал каждую межсезонную
+# среду. TODO: Наталья пришлёт текст и ссылку на фото — вписать сюда.
+GOLDEN_HORSE_EQUESTRIAN_FALLBACK_DESCRIPTION = (
+    "Конный клуб, ресторан и отель в загородном клубе «Голден Хорс» — "
+    "работают круглый год."
+)
+GOLDEN_HORSE_EQUESTRIAN_FALLBACK_PHOTO_URL = ""
 
 GREENWICH_HASHTAGS = ["#СПА", "#ГринвичПарк", "#Таганрог", "#афиша"]
 GOLDEN_HORSE_AQUAZONE_HASHTAGS = ["#Аквазона", "#ГолденХорс", "#Таганрог", "#афиша"]
@@ -1233,50 +1243,7 @@ async def parse_lazurny(session: aiohttp.ClientSession) -> Optional[Event]:
     )
 
 
-async def parse_golden_horse_equestrian(session: aiohttp.ClientSession, attempt: int = 1) -> Optional[Event]:
-    """Межсезонный контент по Голден Хорс: аквазона закрыта, но конный клуб,
-    ресторан и отель на той же территории работают круглый год.
-    Сайт kskgoldenhorse.ru отвечает медленнее остальных — таймаут увеличен
-    до 30 секунд, при неудаче делаем одну повторную попытку."""
-    try:
-        async with session.get(
-            GOLDEN_HORSE_EQUESTRIAN_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=30)
-        ) as resp:
-            if resp.status != 200:
-                logger.warning(f"Голден Хорс (конный клуб): неожиданный статус {resp.status}")
-                return None
-            html_text = await resp.text()
-    except Exception as e:
-        # str(e) у asyncio.TimeoutError обычно пустой — добавляем тип
-        # исключения в лог, иначе причина не читается вообще.
-        logger.error(f"Голден Хорс (конный клуб): ошибка запроса ({type(e).__name__}): {e}")
-        if attempt < 2:
-            logger.info(f"Голден Хорс (конный клуб): повторная попытка {attempt + 1}/2 после паузы")
-            await asyncio.sleep(3)
-            return await parse_golden_horse_equestrian(session, attempt=attempt + 1)
-        return None
-
-    soup = BeautifulSoup(html_text, "html.parser")
-
-    description = "Конный клуб, ресторан и отель в загородном клубе «Голден Хорс» — работают круглый год."
-    og_desc = soup.find("meta", attrs={"property": "og:description"})
-    if og_desc and og_desc.get("content"):
-        description = og_desc["content"].strip()
-    else:
-        logger.warning("Голден Хорс (конный клуб): не нашёл og:description на kskgoldenhorse.ru")
-
-    image_url = None
-    og_image = soup.find("meta", attrs={"property": "og:image"})
-    if og_image and og_image.get("content"):
-        image_url = urljoin(GOLDEN_HORSE_EQUESTRIAN_URL, og_image["content"])
-    else:
-        logger.warning("Голден Хорс (конный клуб): не нашёл og:image на kskgoldenhorse.ru")
-
-    # Общий телефон загородного клуба (тот же объект, тот же контакт-центр,
-    # что и у аквазоны) — используем его же как fallback.
-    phone_candidates = extract_targeted_phones(soup.get_text(separator=" "))
-    phones = phone_candidates or [GOLDEN_HORSE_PHONE]
-
+def _build_golden_horse_equestrian_event(description: str, image_url: Optional[str], phones: List[str]) -> Event:
     return Event(
         title="Загородный клуб «Голден Хорс»: конный клуб, ресторан, отель",
         url=GOLDEN_HORSE_EQUESTRIAN_URL,
@@ -1289,6 +1256,71 @@ async def parse_golden_horse_equestrian(session: aiohttp.ClientSession, attempt:
         buy_ticket_url=GOLDEN_HORSE_EQUESTRIAN_URL,
         image_url=image_url,
     )
+
+
+async def parse_golden_horse_equestrian(session: aiohttp.ClientSession, attempt: int = 1) -> Optional[Event]:
+    """Межсезонный контент по Голден Хорс: аквазона закрыта, но конный клуб,
+    ресторан и отель на той же территории работают круглый год.
+    Сайт kskgoldenhorse.ru отвечает медленнее остальных — таймаут увеличен
+    до 30 секунд, при неудаче делаем одну повторную попытку. Если сайт
+    так и не ответил (похоже на блокировку дата-центровых IP GitHub
+    Actions) — публикуем пост всё равно, с заранее заданным описанием и
+    фото, чтобы среда без поста не оставалась."""
+    try:
+        async with session.get(
+            GOLDEN_HORSE_EQUESTRIAN_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=30)
+        ) as resp:
+            if resp.status != 200:
+                logger.warning(f"Голден Хорс (конный клуб): неожиданный статус {resp.status}")
+                if attempt < 2:
+                    await asyncio.sleep(3)
+                    return await parse_golden_horse_equestrian(session, attempt=attempt + 1)
+                return _build_golden_horse_equestrian_event(
+                    GOLDEN_HORSE_EQUESTRIAN_FALLBACK_DESCRIPTION,
+                    GOLDEN_HORSE_EQUESTRIAN_FALLBACK_PHOTO_URL or None,
+                    [GOLDEN_HORSE_PHONE],
+                )
+            html_text = await resp.text()
+    except Exception as e:
+        # str(e) у asyncio.TimeoutError обычно пустой — добавляем тип
+        # исключения в лог, иначе причина не читается вообще.
+        logger.error(f"Голден Хорс (конный клуб): ошибка запроса ({type(e).__name__}): {e}")
+        if attempt < 2:
+            logger.info(f"Голден Хорс (конный клуб): повторная попытка {attempt + 1}/2 после паузы")
+            await asyncio.sleep(3)
+            return await parse_golden_horse_equestrian(session, attempt=attempt + 1)
+        logger.warning(
+            "Голден Хорс (конный клуб): сайт не ответил после всех попыток — "
+            "публикуем с заранее заданным описанием/фото (fallback)"
+        )
+        return _build_golden_horse_equestrian_event(
+            GOLDEN_HORSE_EQUESTRIAN_FALLBACK_DESCRIPTION,
+            GOLDEN_HORSE_EQUESTRIAN_FALLBACK_PHOTO_URL or None,
+            [GOLDEN_HORSE_PHONE],
+        )
+
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    description = GOLDEN_HORSE_EQUESTRIAN_FALLBACK_DESCRIPTION
+    og_desc = soup.find("meta", attrs={"property": "og:description"})
+    if og_desc and og_desc.get("content"):
+        description = og_desc["content"].strip()
+    else:
+        logger.warning("Голден Хорс (конный клуб): не нашёл og:description на kskgoldenhorse.ru")
+
+    image_url = GOLDEN_HORSE_EQUESTRIAN_FALLBACK_PHOTO_URL or None
+    og_image = soup.find("meta", attrs={"property": "og:image"})
+    if og_image and og_image.get("content"):
+        image_url = urljoin(GOLDEN_HORSE_EQUESTRIAN_URL, og_image["content"])
+    else:
+        logger.warning("Голден Хорс (конный клуб): не нашёл og:image на kskgoldenhorse.ru")
+
+    # Общий телефон загородного клуба (тот же объект, тот же контакт-центр,
+    # что и у аквазоны) — используем его же как fallback.
+    phone_candidates = extract_targeted_phones(soup.get_text(separator=" "))
+    phones = phone_candidates or [GOLDEN_HORSE_PHONE]
+
+    return _build_golden_horse_equestrian_event(description, image_url, phones)
 
 
 async def parse_spa_block(session: aiohttp.ClientSession) -> List[Event]:
