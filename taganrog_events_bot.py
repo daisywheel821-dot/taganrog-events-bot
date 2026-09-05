@@ -280,7 +280,9 @@ def format_event_post(event: Event) -> str:
     if event.time_str:
         lines.append(f"Время: {html.escape(event.time_str)}")
     if event.work_hours:
-        lines.append(f"Режим работы: {html.escape(event.work_hours)}")
+        lines.append("Режим работы:")
+        lines.append(html.escape(event.work_hours))
+        lines.append("")
     if event.prices:
         price_label = PRICE_LABEL_BY_CATEGORY.get(event.category, DEFAULT_PRICE_LABEL)
         lines.append(price_label)
@@ -1022,7 +1024,7 @@ async def parse_charly_cinema(session: aiohttp.ClientSession) -> List[Event]:
 GREENWICH_URL = "https://www.vsemitut.ru/spa/greenwich/"
 GREENWICH_ADDRESS = "ул. Адмирала Крюйса, 2А"
 GREENWICH_PHONE = "8 (8634) 31-42-42"
-GREENWICH_HOURS = "Пн–Ср, Вс: 10:00–22:00. Пт–Сб: 10:00–24:00"
+GREENWICH_HOURS = "Пн-Ср, Вс: 10:00-22:00\nПт-Сб: 10:00-24:00"
 # Цена на странице указана уже со скидкой, но сама скидка (-40%) нигде на
 # странице явно не подписана рядом с числом — фиксируем её отдельно, чтобы
 # в посте было понятно "от 1170 ₽ со скидкой -40%", а не просто голая цифра.
