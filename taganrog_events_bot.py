@@ -94,6 +94,7 @@ HEADERS_BY_CATEGORY = {
     "cinema": "АФИША КИНО ТАГАНРОГА",
     "spa": "СПА И ТЕРМАЛЬНЫЕ КОМПЛЕКСЫ ТАГАНРОГА",
     "theater": "АФИША ТЕАТРА ТАГАНРОГА",
+    "exhibitions": "ВЫСТАВКИ И ЭКСКУРСИИ ТАГАНРОГА",
 }
 
 # Подпись строки цены зависит от категории: у СПА это не "билет", а просто цена.
@@ -854,6 +855,109 @@ async def parse_afishagoroda_theater(session: aiohttp.ClientSession) -> List[Eve
         logger.error(f"Ошибка при парсинге afishagoroda (театр): {e}")
     return events
 
+# ===================== ПАРСИНГ AFISHAGORODA (ВЫСТАВКИ И ЭКСКУРСИИ) =====================
+# Блок "Выставки и экскурсии" стоит по субботам. Движок сайта тот же, что у
+# концертов/театра (tag.afishagoroda.ru), поэтому детальную страницу разбирает
+# та же parse_afishagoroda_detail(). Особенность: это ДВА раздела списка
+# (/events/excursions и /events/vystavka), которые публикуются одним блоком,
+# без дублей по URL между разделами.
+
+EXCURSION_HASHTAGS = ["#Экскурсия", "#Таганрог", "#афиша"]
+EXHIBITION_HASHTAGS = ["#Выставка", "#Таганрог", "#афиша"]
+
+# (раздел на сайте, ярлык типа события в посте, хештеги для этого типа)
+AFISHAGORODA_EXHIBITIONS_SOURCES = [
+    (f"{AFISHAGORODA_BASE}/events/excursions", "Экскурсия", EXCURSION_HASHTAGS),
+    (f"{AFISHAGORODA_BASE}/events/vystavka", "Выставка", EXHIBITION_HASHTAGS),
+]
+
+async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List[Event]:
+    events = []
+    seen_urls = set()  # общий для обоих разделов — событие не задвоится, если попало в оба списка
+
+    # Тот же лимит, что и у концертов/театра — не спамить слишком дальними анонсами.
+    lookahead_limit = date.today() + timedelta(days=90)
+
+    for url, event_type_label, hashtags in AFISHAGORODA_EXHIBITIONS_SOURCES:
+        try:
+            async with session.get(url, headers=HEADERS, timeout=12) as resp:
+                if resp.status != 200:
+                    logger.error(f"afishagoroda exhibitions ({event_type_label}): неожиданный статус {resp.status}")
+                    continue
+                html_text = await resp.text()
+                soup = BeautifulSoup(html_text, "html.parser")
+
+                candidate_links = soup.find_all("a", href=re.compile(r'/events/[a-z0-9\-]+/?$', re.I))
+                logger.info(f"afishagoroda exhibitions ({event_type_label}): найдено ссылок-кандидатов: {len(candidate_links)}")
+
+                for a_tag in candidate_links:
+                    href = ""
+                    fallback_title = ""
+                    try:
+                        href = a_tag.get("href", "")
+                        slug = href.rstrip("/").split("/")[-1].lower()
+                        if slug in AFISHAGORODA_EXCLUDED_SLUGS:
+                            continue
+
+                        fallback_title = a_tag.get_text(strip=True)
+
+                        event_url = urljoin(AFISHAGORODA_BASE, href)
+                        if event_url in seen_urls:
+                            continue
+                        seen_urls.add(event_url)
+
+                        detail_data = await parse_afishagoroda_detail(session, event_url)
+
+                        title = detail_data.get("title") or fallback_title
+                        if not title:
+                            continue
+
+                        # Заслон от чужих категорий (концерты/театр), просочившихся
+                        # через "рекомендуем также"/"похожие мероприятия" на странице списка.
+                        non_exhibition_hints = ("концерт", "спектакл")
+                        if any(hint in title.lower() for hint in non_exhibition_hints):
+                            logger.info(f"Пропуск (похоже, не экскурсия/выставка по названию): {title}")
+                            continue
+
+                        parsed_date = detail_data.get("parsed_date")
+                        if not parsed_date:
+                            # У событий с несколькими показами/диапазоном дат формат
+                            # страницы другой — по общему правилу проекта такие
+                            # события пропускаются, а не показываются без даты.
+                            logger.info(f"Пропуск (не удалось определить дату): {title} — {event_url}")
+                            continue
+                        if parsed_date < date.today():
+                            logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
+                            continue
+                        if parsed_date > lookahead_limit:
+                            logger.info(f"Пропуск (дальше 3 месяцев вперёд, {parsed_date}): {title}")
+                            continue
+
+                        event = Event(
+                            title=title,
+                            url=event_url,
+                            category="exhibitions",
+                            event_type=event_type_label,
+                            date_str=detail_data.get("date_str", ""),
+                            parsed_date=parsed_date,
+                            time_str=detail_data.get("time_str", ""),
+                            location=detail_data.get("location", ""),
+                            prices=detail_data.get("prices", ""),
+                            age_rating=detail_data.get("age_rating", ""),
+                            hashtags=hashtags,
+                            buy_ticket_url=detail_data.get("buy_ticket_url", ""),
+                            image_url=detail_data.get("image_url"),
+                        )
+                        events.append(event)
+                        logger.info(f"Событие добавлено к отправке: {title} ({parsed_date})")
+                    except Exception as item_err:
+                        logger.error(f"Ошибка при обработке карточки afishagoroda ({event_type_label}) '{fallback_title or href}': {item_err}")
+                        continue
+        except Exception as e:
+            logger.error(f"Ошибка при парсинге afishagoroda ({event_type_label}): {e}")
+
+    return events
+
 # ===================== ПАРСИНГ AFISHA.RU (КИНО, ЧАРЛИ МАРМЕЛАД) =====================
 # kinocharly.ru отдаёт пустую страницу простому парсеру (сайт на JS), поэтому
 # используем afisha.ru как рабочую альтернативу для того же кинотеатра.
@@ -1509,6 +1613,7 @@ WEEKDAY_BLOCKS = {
     2: "spa",
     3: "cinema",
     4: "theater",
+    5: "exhibitions",
 }
 
 async def run_block(block_name: str, session: aiohttp.ClientSession) -> List[Event]:
@@ -1523,6 +1628,8 @@ async def run_block(block_name: str, session: aiohttp.ClientSession) -> List[Eve
         return await parse_spa_block(session)
     elif block_name == "theater":
         return await parse_afishagoroda_theater(session)
+    elif block_name == "exhibitions":
+        return await parse_afishagoroda_exhibitions(session)
     else:
         logger.error(f"Неизвестный блок: {block_name}")
         return []
