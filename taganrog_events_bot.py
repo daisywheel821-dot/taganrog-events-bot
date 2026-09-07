@@ -596,7 +596,7 @@ AFISHAGORODA_BASE = "https://tag.afishagoroda.ru"
 # точно так же (/events/<slug>), поэтому явно исключаем по названию раздела.
 AFISHAGORODA_EXCLUDED_SLUGS = {
     "koncert", "teatr", "show", "muzei", "excursions", "vystavka",
-    "detiam", "stand-up", "kvest", "cirk", "sport", "bonus"
+    "detiam", "stand-up", "kvest", "cirk", "sport", "bonus", "education"
 }
 
 # Страница бонусной программы сайта — добавляем на неё кликабельную ссылку
@@ -609,6 +609,11 @@ async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: 
         "title": "", "date_str": "", "parsed_date": None, "time_str": "",
         "location": "", "prices": "", "age_rating": "",
         "buy_ticket_url": "", "image_url": None,
+        # Диагностика для случаев, когда "Когда:" в тексте не совпало с
+        # ожидаемым форматом "ДД.ММ.ГГГГ ЧЧ:ММ" (например, у экскурсий/выставок
+        # период "с ... по ..." или "по предварительной записи" без даты).
+        # Используется только в логах, на формирование поста не влияет.
+        "when_raw_snippet": "",
     }
     try:
         async with session.get(detail_url, headers=HEADERS, timeout=10) as resp:
@@ -640,6 +645,12 @@ async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: 
                 except ValueError:
                     pass
                 data["time_str"] = when_match.group(2)
+            else:
+                when_label_match = re.search(r'Когда:\s*(.{0,120})', text)
+                if when_label_match:
+                    data["when_raw_snippet"] = when_label_match.group(1).strip()
+                else:
+                    data["when_raw_snippet"] = "(метка 'Когда:' на странице не найдена вовсе)"
 
             where_match = re.search(r'Где:\s*(.+?)\s*(?=Стоимость билетов:|Возрастные ограничения:|$)', text)
             if where_match:
@@ -924,7 +935,14 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
                             # У событий с несколькими показами/диапазоном дат формат
                             # страницы другой — по общему правилу проекта такие
                             # события пропускаются, а не показываются без даты.
-                            logger.info(f"Пропуск (не удалось определить дату): {title} — {event_url}")
+                            # Логируем сырой текст рядом с "Когда:" для диагностики
+                            # реального формата на странице (временная мера, пока
+                            # формат для этой категории не подтверждён).
+                            snippet = detail_data.get("when_raw_snippet", "")
+                            logger.info(
+                                f"Пропуск (не удалось определить дату): {title} — {event_url} "
+                                f"| сырой текст 'Когда:': {snippet!r}"
+                            )
                             continue
                         if parsed_date < date.today():
                             logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
