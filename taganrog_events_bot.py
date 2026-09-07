@@ -609,10 +609,17 @@ async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: 
         "title": "", "date_str": "", "parsed_date": None, "time_str": "",
         "location": "", "prices": "", "age_rating": "",
         "buy_ticket_url": "", "image_url": None,
-        # Диагностика для случаев, когда "Когда:" в тексте не совпало с
-        # ожидаемым форматом "ДД.ММ.ГГГГ ЧЧ:ММ" (например, у экскурсий/выставок
-        # период "с ... по ..." или "по предварительной записи" без даты).
-        # Используется только в логах, на формирование поста не влияет.
+        # Диапазон дат ("01.02.2026 – 30.12.2026") — типичный формат для
+        # длительных выставок и постоянных экскурсионных программ, в отличие
+        # от разового "Когда: ДД.ММ.ГГГГ ЧЧ:ММ" у концертов/театра. Заполняется
+        # только если однодневный формат не совпал. Используется по решению
+        # конкретного блока-парсера (концерты/театр его игнорируют и, как и
+        # раньше, пропускают такие события; выставки/экскурсии — учитывают).
+        "range_start_date": None,
+        "range_end_date": None,
+        # Диагностика для случаев, когда "Когда:" в тексте не совпало ни с
+        # разовым форматом, ни с диапазоном. Используется только в логах,
+        # на формирование поста не влияет.
         "when_raw_snippet": "",
     }
     try:
@@ -646,6 +653,18 @@ async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: 
                     pass
                 data["time_str"] = when_match.group(2)
             else:
+                range_match = re.search(
+                    r'Когда:\s*(\d{2}\.\d{2}\.\d{4})\s*[–\-—]\s*(\d{2}\.\d{2}\.\d{4})', text
+                )
+                if range_match:
+                    try:
+                        d1, m1, y1 = range_match.group(1).split(".")
+                        d2, m2, y2 = range_match.group(2).split(".")
+                        data["range_start_date"] = date(int(y1), int(m1), int(d1))
+                        data["range_end_date"] = date(int(y2), int(m2), int(d2))
+                    except ValueError:
+                        pass
+
                 when_label_match = re.search(r'Когда:\s*(.{0,120})', text)
                 if when_label_match:
                     data["when_raw_snippet"] = when_label_match.group(1).strip()
@@ -931,24 +950,43 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
                             continue
 
                         parsed_date = detail_data.get("parsed_date")
-                        if not parsed_date:
-                            # У событий с несколькими показами/диапазоном дат формат
-                            # страницы другой — по общему правилу проекта такие
-                            # события пропускаются, а не показываются без даты.
-                            # Логируем сырой текст рядом с "Когда:" для диагностики
-                            # реального формата на странице (временная мера, пока
-                            # формат для этой категории не подтверждён).
+                        range_start = detail_data.get("range_start_date")
+                        range_end = detail_data.get("range_end_date")
+
+                        if parsed_date:
+                            # Разовая дата/время — та же логика, что у концертов/театра.
+                            if parsed_date < date.today():
+                                logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
+                                continue
+                            if parsed_date > lookahead_limit:
+                                logger.info(f"Пропуск (дальше 3 месяцев вперёд, {parsed_date}): {title}")
+                                continue
+                            final_parsed_date = parsed_date
+                            final_date_str = detail_data.get("date_str", "")
+                        elif range_start and range_end:
+                            # Период проведения ("01.02.2026 – 30.12.2026") — типично
+                            # для длительных выставок и постоянных экскурсионных
+                            # программ. Событие актуально, пока период не закончился.
+                            if range_end < date.today():
+                                logger.info(f"Пропуск (период уже закончился {range_end}): {title}")
+                                continue
+                            if range_start > lookahead_limit:
+                                logger.info(f"Пропуск (начало периода дальше 3 месяцев вперёд, {range_start}): {title}")
+                                continue
+                            final_parsed_date = range_start
+                            final_date_str = (
+                                f"с {range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')} "
+                                f"по {range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
+                            )
+                        else:
+                            # Ни разовая дата, ни период не распознаны — пропускаем,
+                            # а не показываем без даты (правило проекта). Логируем
+                            # сырой текст рядом с "Когда:" для диагностики формата.
                             snippet = detail_data.get("when_raw_snippet", "")
                             logger.info(
                                 f"Пропуск (не удалось определить дату): {title} — {event_url} "
                                 f"| сырой текст 'Когда:': {snippet!r}"
                             )
-                            continue
-                        if parsed_date < date.today():
-                            logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
-                            continue
-                        if parsed_date > lookahead_limit:
-                            logger.info(f"Пропуск (дальше 3 месяцев вперёд, {parsed_date}): {title}")
                             continue
 
                         event = Event(
@@ -956,8 +994,8 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
                             url=event_url,
                             category="exhibitions",
                             event_type=event_type_label,
-                            date_str=detail_data.get("date_str", ""),
-                            parsed_date=parsed_date,
+                            date_str=final_date_str,
+                            parsed_date=final_parsed_date,
                             time_str=detail_data.get("time_str", ""),
                             location=detail_data.get("location", ""),
                             prices=detail_data.get("prices", ""),
