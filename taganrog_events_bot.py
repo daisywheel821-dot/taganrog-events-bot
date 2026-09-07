@@ -927,12 +927,14 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
                         href = a_tag.get("href", "")
                         slug = href.rstrip("/").split("/")[-1].lower()
                         if slug in AFISHAGORODA_EXCLUDED_SLUGS:
+                            logger.info(f"Пропуск (исключённый слаг раздела '{slug}'): {href}")
                             continue
 
                         fallback_title = a_tag.get_text(strip=True)
 
                         event_url = urljoin(AFISHAGORODA_BASE, href)
                         if event_url in seen_urls:
+                            logger.info(f"Пропуск (уже обработан ранее, дубль ссылки на странице): {event_url}")
                             continue
                         seen_urls.add(event_url)
 
@@ -940,6 +942,7 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
 
                         title = detail_data.get("title") or fallback_title
                         if not title:
+                            logger.info(f"Пропуск (не удалось определить название, ни <h1>, ни текст ссылки): {event_url}")
                             continue
 
                         # Заслон от чужих категорий (концерты/театр), просочившихся
