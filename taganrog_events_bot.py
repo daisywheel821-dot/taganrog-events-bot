@@ -1037,18 +1037,10 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
                                 logger.info(f"Пропуск (начало периода дальше 3 месяцев вперёд, {range_start}): {title}")
                                 continue
                             final_parsed_date = range_start
-                            if range_start <= date.today():
-                                # Период уже идёт — показывать "с ДД месяца" из
-                                # прошлого было бы вводящим в заблуждение (событие
-                                # выглядело бы так, будто уже кончилось/устарело).
-                                final_date_str = (
-                                    f"до {range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
-                                )
-                            else:
-                                final_date_str = (
-                                    f"с {range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')} "
-                                    f"по {range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
-                                )
+                            final_date_str = (
+                                f"с {range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')} "
+                                f"по {range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
+                            )
                         else:
                             # Ни разовая дата, ни период не распознаны — пропускаем,
                             # а не показываем без даты (правило проекта). Логируем
