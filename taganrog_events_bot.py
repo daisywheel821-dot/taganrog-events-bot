@@ -697,20 +697,25 @@ async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: 
         logger.error(f"Ошибка при парсинге детальной страницы afishagoroda {detail_url}: {e}")
     return data
 
+AFISHAGORODA_CONCERTS_SOURCES = [
+    f"{AFISHAGORODA_BASE}/events/koncert",
+    f"{AFISHAGORODA_BASE}/events/show",
+]
+
 async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Event]:
     events = []
-    seen_urls = set()
-    url = f"{AFISHAGORODA_BASE}/events/koncert"
+    seen_urls = set()  # общий для обоих разделов (концерты + шоу) — без дублей
 
     # Показываем события не дальше чем на 3 месяца вперёд — билеты уже можно
     # купить заранее, но не переспамливаем канал слишком дальними анонсами.
     lookahead_limit = date.today() + timedelta(days=90)
 
-    try:
+    for url in AFISHAGORODA_CONCERTS_SOURCES:
+      try:
         async with session.get(url, headers=HEADERS, timeout=12) as resp:
             if resp.status != 200:
-                logger.error(f"afishagoroda concert: неожиданный статус {resp.status}")
-                return events
+                logger.error(f"afishagoroda concert ({url}): неожиданный статус {resp.status}")
+                continue
             html_text = await resp.text()
             soup = BeautifulSoup(html_text, "html.parser")
 
@@ -720,7 +725,7 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
             # события берём с детальной страницы (см. ниже), где оно указано
             # в чётком структурированном виде.
             candidate_links = soup.find_all("a", href=re.compile(r'/events/[a-z0-9\-]+/?$', re.I))
-            logger.info(f"afishagoroda concert: найдено ссылок-кандидатов: {len(candidate_links)}")
+            logger.info(f"afishagoroda concert ({url}): найдено ссылок-кандидатов: {len(candidate_links)}")
 
             for a_tag in candidate_links:
                 href = ""
@@ -755,42 +760,70 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
                         continue
 
                     parsed_date = detail_data.get("parsed_date")
-                    if not parsed_date:
+                    range_start = detail_data.get("range_start_date")
+                    range_end = detail_data.get("range_end_date")
+
+                    if parsed_date:
+                        if parsed_date < date.today():
+                            logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
+                            continue
+                        if parsed_date > lookahead_limit:
+                            logger.info(f"Пропуск (дальше 3 месяцев вперёд, {parsed_date}): {title}")
+                            continue
+                        final_parsed_date = parsed_date
+                        final_date_str = detail_data.get("date_str", "")
+                    elif range_start and range_end:
+                        # Многодневный формат ("01.06.2026 – 02.06.2026") — типично
+                        # для городских праздников/фестивалей (например, "День
+                        # города"), а не только для выставок. Событие актуально,
+                        # пока период не закончился.
+                        if range_end < date.today():
+                            logger.info(f"Пропуск (период уже закончился {range_end}): {title}")
+                            continue
+                        if range_start > lookahead_limit:
+                            logger.info(f"Пропуск (начало периода дальше 3 месяцев вперёд, {range_start}): {title}")
+                            continue
+                        final_parsed_date = range_start
+                        if range_start == range_end:
+                            final_date_str = f"{range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')}"
+                        else:
+                            final_date_str = (
+                                f"{range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')} – "
+                                f"{range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
+                            )
+                    else:
                         # Дату не удалось распознать (например, у событий с
-                        # несколькими датами/диапазоном показов формат страницы
-                        # другой) — пропускаем, а не показываем без даты и не
-                        # пропускаем мимо фильтра на 3 месяца вперёд.
-                        logger.info(f"Пропуск (не удалось определить дату): {title} — {event_url}")
-                        continue
-                    if parsed_date < date.today():
-                        logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
-                        continue
-                    if parsed_date > lookahead_limit:
-                        logger.info(f"Пропуск (дальше 3 месяцев вперёд, {parsed_date}): {title}")
+                        # несколькими датами/показами формат страницы другой) —
+                        # пропускаем, а не показываем без даты.
+                        snippet = detail_data.get("when_raw_snippet", "")
+                        logger.info(
+                            f"Пропуск (не удалось определить дату): {title} — {event_url} "
+                            f"| сырой текст 'Когда:': {snippet!r}"
+                        )
                         continue
 
                     event = Event(
                         title=title,
                         url=event_url,
                         category="concerts",
-                        event_type="Концерт",
-                        date_str=detail_data.get("date_str", ""),
-                        parsed_date=parsed_date,
+                        event_type="Концерт" if url.endswith("/koncert") else "Шоу",
+                        date_str=final_date_str,
+                        parsed_date=final_parsed_date,
                         time_str=detail_data.get("time_str", ""),
                         location=detail_data.get("location", ""),
                         prices=detail_data.get("prices", ""),
                         age_rating=detail_data.get("age_rating", ""),
-                        hashtags=["#Концерт", "#Таганрог", "#афиша"],
+                        hashtags=["#Концерт", "#Таганрог", "#афиша"] if url.endswith("/koncert") else ["#Шоу", "#Таганрог", "#афиша"],
                         buy_ticket_url=detail_data.get("buy_ticket_url", ""),
                         image_url=detail_data.get("image_url"),
                     )
                     events.append(event)
-                    logger.info(f"Событие добавлено к отправке: {title} ({parsed_date})")
+                    logger.info(f"Событие добавлено к отправке: {title} ({final_parsed_date})")
                 except Exception as item_err:
                     logger.error(f"Ошибка при обработке карточки afishagoroda '{fallback_title or href}': {item_err}")
                     continue
-    except Exception as e:
-        logger.error(f"Ошибка при парсинге afishagoroda (концерты): {e}")
+      except Exception as e:
+        logger.error(f"Ошибка при парсинге afishagoroda (концерты, {url}): {e}")
     return events
 
 # ===================== ПАРСИНГ AFISHAGORODA (ТЕАТР) =====================
