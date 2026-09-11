@@ -894,21 +894,46 @@ async def parse_afishagoroda_theater(session: aiohttp.ClientSession) -> List[Eve
 
 EXCURSION_HASHTAGS = ["#Экскурсия", "#Таганрог", "#афиша"]
 EXHIBITION_HASHTAGS = ["#Выставка", "#Таганрог", "#афиша"]
+MASTERCLASS_HASHTAGS = ["#МастерКласс", "#Таганрог", "#афиша"]
+LECTURE_HASHTAGS = ["#Лекция", "#Таганрог", "#афиша"]
 
-# (раздел на сайте, ярлык типа события в посте, хештеги для этого типа)
+# По каждому ключевому слову в названии — тип события и хештеги для поста.
+# Используется там, где источник смешанный (например, страница площадки,
+# на которой вперемешку выставки/экскурсии/мастер-классы/лекции) — тип
+# определяем по факту, а не полагаемся на ярлык источника.
+EVENT_TYPE_BY_KEYWORD = [
+    ("выставк", "Выставка", EXHIBITION_HASHTAGS),
+    ("экскурси", "Экскурсия", EXCURSION_HASHTAGS),
+    ("мастер-класс", "Мастер-класс", MASTERCLASS_HASHTAGS),
+    ("мастер класс", "Мастер-класс", MASTERCLASS_HASHTAGS),
+    ("лекци", "Лекция", LECTURE_HASHTAGS),
+]
+
+# Библиотека им. Чехова — площадка, где реально проходит большинство выставок,
+# которые на сайте почему-то попадают в категорию "Образование", а не
+# "Выставки" (см. /events/vystavka — пустой). Страница площадки листит все
+# её текущие мероприятия одним списком, поэтому берём её отдельным источником
+# с обязательной проверкой по ключевым словам в названии (require_keyword_match),
+# чтобы не подтянуть с этой же площадки, например, детский концерт.
+PLACE_BIBLIOTEKA_CHEHOVA_URL = f"{AFISHAGORODA_BASE}/places/biblioteka-im-chehova"
+
+# (раздел на сайте, ярлык типа события по умолчанию, хештеги по умолчанию,
+#  обязательна ли проверка по ключевым словам в названии)
 AFISHAGORODA_EXHIBITIONS_SOURCES = [
-    (f"{AFISHAGORODA_BASE}/events/excursions", "Экскурсия", EXCURSION_HASHTAGS),
-    (f"{AFISHAGORODA_BASE}/events/vystavka", "Выставка", EXHIBITION_HASHTAGS),
+    (f"{AFISHAGORODA_BASE}/events/excursions", "Экскурсия", EXCURSION_HASHTAGS, False),
+    (f"{AFISHAGORODA_BASE}/events/vystavka", "Выставка", EXHIBITION_HASHTAGS, False),
+    (PLACE_BIBLIOTEKA_CHEHOVA_URL, "Выставка", EXHIBITION_HASHTAGS, True),
 ]
 
 async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List[Event]:
     events = []
-    seen_urls = set()  # общий для обоих разделов — событие не задвоится, если попало в оба списка
+    seen_urls = set()  # общий для всех источников — событие не задвоится, если попало в несколько списков
 
     # Тот же лимит, что и у концертов/театра — не спамить слишком дальними анонсами.
     lookahead_limit = date.today() + timedelta(days=90)
 
-    for url, event_type_label, hashtags in AFISHAGORODA_EXHIBITIONS_SOURCES:
+    for url, default_event_type_label, default_hashtags, require_keyword_match in AFISHAGORODA_EXHIBITIONS_SOURCES:
+        event_type_label = default_event_type_label  # используется в логах ошибок ниже
         try:
             async with session.get(url, headers=HEADERS, timeout=12) as resp:
                 if resp.status != 200:
@@ -919,6 +944,22 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
 
                 candidate_links = soup.find_all("a", href=re.compile(r'/events/[a-z0-9\-]+/?$', re.I))
                 logger.info(f"afishagoroda exhibitions ({event_type_label}): найдено ссылок-кандидатов: {len(candidate_links)}")
+
+                # Временная расширенная диагностика: если основная маска почти
+                # ничего не даёт (например, все ссылки — служебное меню, а
+                # реальных событий 0), смотрим ВСЕ уникальные href на странице,
+                # содержащие "/events/", включая те, что не подошли под маску
+                # (пагинация "?page=2", другой формат ссылки и т.п.).
+                all_event_like_hrefs = sorted({
+                    a.get("href", "") for a in soup.find_all("a", href=True)
+                    if "/events/" in a.get("href", "")
+                })
+                logger.info(
+                    f"afishagoroda exhibitions ({event_type_label}): всего уникальных href, "
+                    f"содержащих '/events/', на странице: {len(all_event_like_hrefs)}"
+                )
+                for h in all_event_like_hrefs[:60]:
+                    logger.info(f"  [диагностика href] {h}")
 
                 for a_tag in candidate_links:
                     href = ""
@@ -952,6 +993,21 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
                             logger.info(f"Пропуск (похоже, не экскурсия/выставка по названию): {title}")
                             continue
 
+                        title_lower = title.lower()
+                        event_type_label = default_event_type_label
+                        hashtags = default_hashtags
+                        if require_keyword_match:
+                            matched = False
+                            for keyword, label, tags in EVENT_TYPE_BY_KEYWORD:
+                                if keyword in title_lower:
+                                    event_type_label = label
+                                    hashtags = tags
+                                    matched = True
+                                    break
+                            if not matched:
+                                logger.info(f"Пропуск (источник смешанный, название не похоже на экскурсию/выставку/мастер-класс/лекцию): {title}")
+                                continue
+
                         parsed_date = detail_data.get("parsed_date")
                         range_start = detail_data.get("range_start_date")
                         range_end = detail_data.get("range_end_date")
@@ -977,10 +1033,18 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
                                 logger.info(f"Пропуск (начало периода дальше 3 месяцев вперёд, {range_start}): {title}")
                                 continue
                             final_parsed_date = range_start
-                            final_date_str = (
-                                f"с {range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')} "
-                                f"по {range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
-                            )
+                            if range_start <= date.today():
+                                # Период уже идёт — показывать "с ДД месяца" из
+                                # прошлого было бы вводящим в заблуждение (событие
+                                # выглядело бы так, будто уже кончилось/устарело).
+                                final_date_str = (
+                                    f"до {range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
+                                )
+                            else:
+                                final_date_str = (
+                                    f"с {range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')} "
+                                    f"по {range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
+                                )
                         else:
                             # Ни разовая дата, ни период не распознаны — пропускаем,
                             # а не показываем без даты (правило проекта). Логируем
