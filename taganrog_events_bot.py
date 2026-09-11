@@ -86,6 +86,10 @@ class Event:
     buy_ticket_url: str = ""
     image_url: Optional[str] = None
     age_rating: str = ""
+    # Переопределяет подпись кнопки для конкретного события (например,
+    # "Подробнее" вместо "Купить билет" у бесплатных мероприятий), даже если
+    # у всей категории по умолчанию другая подпись.
+    ticket_button_label: str = ""
 
 # Заголовок поста зависит от того, какой это тематический блок недели.
 HEADERS_BY_CATEGORY = {
@@ -94,7 +98,7 @@ HEADERS_BY_CATEGORY = {
     "cinema": "АФИША КИНО ТАГАНРОГА",
     "spa": "СПА И ТЕРМАЛЬНЫЕ КОМПЛЕКСЫ ТАГАНРОГА",
     "theater": "АФИША ТЕАТРА ТАГАНРОГА",
-    "exhibitions": "ВЫСТАВКИ ТАГАНРОГА",
+    "exhibitions": "МЕРОПРИЯТИЯ ТАГАНРОГА",
 }
 
 # Подпись строки цены зависит от категории: у СПА это не "билет", а просто цена.
@@ -1108,14 +1112,12 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
                     logger.info(f"Пропуск (разовое событие, период уже закончился {range_end}): {title}")
                     continue
                 final_parsed_date = range_start
-                if range_start <= date.today():
-                    final_date_str = f"до {range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
-                elif range_start == range_end:
+                if range_start == range_end:
                     final_date_str = f"{range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')}"
                 else:
                     final_date_str = (
-                        f"{range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')} – "
-                        f"{range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
+                        f"с {range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')} "
+                        f"по {range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
                     )
             else:
                 snippet = detail_data.get("when_raw_snippet", "")
@@ -1129,16 +1131,21 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
                 title=title,
                 url=extra_url,
                 category="exhibitions",
-                event_type="Городской праздник",
+                event_type=(
+                    "Городской праздник\n"
+                    "В программе: конкурсы, акции, квизы, выставки, турниры. "
+                    "Мероприятия проходят на разных площадках города."
+                ),
                 date_str=final_date_str,
                 parsed_date=final_parsed_date,
                 time_str=detail_data.get("time_str", ""),
                 location=detail_data.get("location", ""),
-                prices=detail_data.get("prices", ""),
+                prices="Бесплатно",
                 age_rating=detail_data.get("age_rating", ""),
                 hashtags=["#ДеньГорода", "#Таганрог", "#афиша"],
                 buy_ticket_url=detail_data.get("buy_ticket_url", ""),
                 image_url=detail_data.get("image_url"),
+                ticket_button_label="Подробнее",
             )
             events.append(event)
             logger.info(f"Разовое событие добавлено к отправке: {title} ({final_parsed_date})")
@@ -1753,7 +1760,7 @@ async def send_event_to_telegram(bot: Bot, user_id: int, event: Event, session: 
     
     keyboard = []
     if event.buy_ticket_url:
-        button_label = TICKET_BUTTON_LABEL_BY_CATEGORY.get(event.category, DEFAULT_TICKET_BUTTON_LABEL)
+        button_label = event.ticket_button_label or TICKET_BUTTON_LABEL_BY_CATEGORY.get(event.category, DEFAULT_TICKET_BUTTON_LABEL)
         keyboard.append([InlineKeyboardButton(button_label, url=event.buy_ticket_url)])
     if event.category == "concerts":
         keyboard.append([InlineKeyboardButton("Бонусная программа", url=AFISHAGORODA_BONUS_URL)])
