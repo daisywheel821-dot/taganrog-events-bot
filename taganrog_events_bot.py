@@ -94,7 +94,7 @@ HEADERS_BY_CATEGORY = {
     "cinema": "АФИША КИНО ТАГАНРОГА",
     "spa": "СПА И ТЕРМАЛЬНЫЕ КОМПЛЕКСЫ ТАГАНРОГА",
     "theater": "АФИША ТЕАТРА ТАГАНРОГА",
-    "exhibitions": "ВЫСТАВКИ И ЭКСКУРСИИ ТАГАНРОГА",
+    "exhibitions": "ВЫСТАВКИ ТАГАНРОГА",
 }
 
 # Подпись строки цены зависит от категории: у СПА это не "билет", а просто цена.
@@ -697,25 +697,20 @@ async def parse_afishagoroda_detail(session: aiohttp.ClientSession, detail_url: 
         logger.error(f"Ошибка при парсинге детальной страницы afishagoroda {detail_url}: {e}")
     return data
 
-AFISHAGORODA_CONCERTS_SOURCES = [
-    f"{AFISHAGORODA_BASE}/events/koncert",
-    f"{AFISHAGORODA_BASE}/events/show",
-]
-
 async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Event]:
     events = []
-    seen_urls = set()  # общий для обоих разделов (концерты + шоу) — без дублей
+    seen_urls = set()
+    url = f"{AFISHAGORODA_BASE}/events/koncert"
 
     # Показываем события не дальше чем на 3 месяца вперёд — билеты уже можно
     # купить заранее, но не переспамливаем канал слишком дальними анонсами.
     lookahead_limit = date.today() + timedelta(days=90)
 
-    for url in AFISHAGORODA_CONCERTS_SOURCES:
-      try:
+    try:
         async with session.get(url, headers=HEADERS, timeout=12) as resp:
             if resp.status != 200:
-                logger.error(f"afishagoroda concert ({url}): неожиданный статус {resp.status}")
-                continue
+                logger.error(f"afishagoroda concert: неожиданный статус {resp.status}")
+                return events
             html_text = await resp.text()
             soup = BeautifulSoup(html_text, "html.parser")
 
@@ -725,7 +720,7 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
             # события берём с детальной страницы (см. ниже), где оно указано
             # в чётком структурированном виде.
             candidate_links = soup.find_all("a", href=re.compile(r'/events/[a-z0-9\-]+/?$', re.I))
-            logger.info(f"afishagoroda concert ({url}): найдено ссылок-кандидатов: {len(candidate_links)}")
+            logger.info(f"afishagoroda concert: найдено ссылок-кандидатов: {len(candidate_links)}")
 
             for a_tag in candidate_links:
                 href = ""
@@ -760,70 +755,42 @@ async def parse_afishagoroda_concerts(session: aiohttp.ClientSession) -> List[Ev
                         continue
 
                     parsed_date = detail_data.get("parsed_date")
-                    range_start = detail_data.get("range_start_date")
-                    range_end = detail_data.get("range_end_date")
-
-                    if parsed_date:
-                        if parsed_date < date.today():
-                            logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
-                            continue
-                        if parsed_date > lookahead_limit:
-                            logger.info(f"Пропуск (дальше 3 месяцев вперёд, {parsed_date}): {title}")
-                            continue
-                        final_parsed_date = parsed_date
-                        final_date_str = detail_data.get("date_str", "")
-                    elif range_start and range_end:
-                        # Многодневный формат ("01.06.2026 – 02.06.2026") — типично
-                        # для городских праздников/фестивалей (например, "День
-                        # города"), а не только для выставок. Событие актуально,
-                        # пока период не закончился.
-                        if range_end < date.today():
-                            logger.info(f"Пропуск (период уже закончился {range_end}): {title}")
-                            continue
-                        if range_start > lookahead_limit:
-                            logger.info(f"Пропуск (начало периода дальше 3 месяцев вперёд, {range_start}): {title}")
-                            continue
-                        final_parsed_date = range_start
-                        if range_start == range_end:
-                            final_date_str = f"{range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')}"
-                        else:
-                            final_date_str = (
-                                f"{range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')} – "
-                                f"{range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
-                            )
-                    else:
+                    if not parsed_date:
                         # Дату не удалось распознать (например, у событий с
-                        # несколькими датами/показами формат страницы другой) —
-                        # пропускаем, а не показываем без даты.
-                        snippet = detail_data.get("when_raw_snippet", "")
-                        logger.info(
-                            f"Пропуск (не удалось определить дату): {title} — {event_url} "
-                            f"| сырой текст 'Когда:': {snippet!r}"
-                        )
+                        # несколькими датами/диапазоном показов формат страницы
+                        # другой) — пропускаем, а не показываем без даты и не
+                        # пропускаем мимо фильтра на 3 месяца вперёд.
+                        logger.info(f"Пропуск (не удалось определить дату): {title} — {event_url}")
+                        continue
+                    if parsed_date < date.today():
+                        logger.info(f"Пропуск (прошедшая дата {parsed_date}): {title}")
+                        continue
+                    if parsed_date > lookahead_limit:
+                        logger.info(f"Пропуск (дальше 3 месяцев вперёд, {parsed_date}): {title}")
                         continue
 
                     event = Event(
                         title=title,
                         url=event_url,
                         category="concerts",
-                        event_type="Концерт" if url.endswith("/koncert") else "Шоу",
-                        date_str=final_date_str,
-                        parsed_date=final_parsed_date,
+                        event_type="Концерт",
+                        date_str=detail_data.get("date_str", ""),
+                        parsed_date=parsed_date,
                         time_str=detail_data.get("time_str", ""),
                         location=detail_data.get("location", ""),
                         prices=detail_data.get("prices", ""),
                         age_rating=detail_data.get("age_rating", ""),
-                        hashtags=["#Концерт", "#Таганрог", "#афиша"] if url.endswith("/koncert") else ["#Шоу", "#Таганрог", "#афиша"],
+                        hashtags=["#Концерт", "#Таганрог", "#афиша"],
                         buy_ticket_url=detail_data.get("buy_ticket_url", ""),
                         image_url=detail_data.get("image_url"),
                     )
                     events.append(event)
-                    logger.info(f"Событие добавлено к отправке: {title} ({final_parsed_date})")
+                    logger.info(f"Событие добавлено к отправке: {title} ({parsed_date})")
                 except Exception as item_err:
                     logger.error(f"Ошибка при обработке карточки afishagoroda '{fallback_title or href}': {item_err}")
                     continue
-      except Exception as e:
-        logger.error(f"Ошибка при парсинге afishagoroda (концерты, {url}): {e}")
+    except Exception as e:
+        logger.error(f"Ошибка при парсинге afishagoroda (концерты): {e}")
     return events
 
 # ===================== ПАРСИНГ AFISHAGORODA (ТЕАТР) =====================
@@ -918,28 +885,21 @@ async def parse_afishagoroda_theater(session: aiohttp.ClientSession) -> List[Eve
         logger.error(f"Ошибка при парсинге afishagoroda (театр): {e}")
     return events
 
-# ===================== ПАРСИНГ AFISHAGORODA (ВЫСТАВКИ И ЭКСКУРСИИ) =====================
-# Блок "Выставки и экскурсии" стоит по субботам. Движок сайта тот же, что у
-# концертов/театра (tag.afishagoroda.ru), поэтому детальную страницу разбирает
-# та же parse_afishagoroda_detail(). Особенность: это ДВА раздела списка
-# (/events/excursions и /events/vystavka), которые публикуются одним блоком,
-# без дублей по URL между разделами.
+# ===================== ПАРСИНГ AFISHAGORODA (ВЫСТАВКИ) =====================
+# Блок "Выставки" стоит по субботам. Движок сайта тот же, что у концертов/
+# театра (tag.afishagoroda.ru), поэтому детальную страницу разбирает та же
+# parse_afishagoroda_detail(). Источники: раздел /events/vystavka (на момент
+# написания реально пуст — выставки на сайте почему-то попадают в другие
+# категории) и страница площадки (Библиотека им. Чехова), где выставки
+# фактически проходят. Плюс разовые дополнительные события (см. ниже).
 
-EXCURSION_HASHTAGS = ["#Экскурсия", "#Таганрог", "#афиша"]
 EXHIBITION_HASHTAGS = ["#Выставка", "#Таганрог", "#афиша"]
-MASTERCLASS_HASHTAGS = ["#МастерКласс", "#Таганрог", "#афиша"]
-LECTURE_HASHTAGS = ["#Лекция", "#Таганрог", "#афиша"]
 
-# По каждому ключевому слову в названии — тип события и хештеги для поста.
-# Используется там, где источник смешанный (например, страница площадки,
-# на которой вперемешку выставки/экскурсии/мастер-классы/лекции) — тип
-# определяем по факту, а не полагаемся на ярлык источника.
+# По ключевому слову в названии определяем, что это действительно выставка —
+# используется там, где источник смешанный (страница площадки, на которой
+# вперемешку разные форматы мероприятий).
 EVENT_TYPE_BY_KEYWORD = [
     ("выставк", "Выставка", EXHIBITION_HASHTAGS),
-    ("экскурси", "Экскурсия", EXCURSION_HASHTAGS),
-    ("мастер-класс", "Мастер-класс", MASTERCLASS_HASHTAGS),
-    ("мастер класс", "Мастер-класс", MASTERCLASS_HASHTAGS),
-    ("лекци", "Лекция", LECTURE_HASHTAGS),
 ]
 
 # Библиотека им. Чехова — площадка, где реально проходит большинство выставок,
@@ -953,9 +913,16 @@ PLACE_BIBLIOTEKA_CHEHOVA_URL = f"{AFISHAGORODA_BASE}/places/biblioteka-im-chehov
 # (раздел на сайте, ярлык типа события по умолчанию, хештеги по умолчанию,
 #  обязательна ли проверка по ключевым словам в названии)
 AFISHAGORODA_EXHIBITIONS_SOURCES = [
-    (f"{AFISHAGORODA_BASE}/events/excursions", "Экскурсия", EXCURSION_HASHTAGS, False),
     (f"{AFISHAGORODA_BASE}/events/vystavka", "Выставка", EXHIBITION_HASHTAGS, False),
     (PLACE_BIBLIOTEKA_CHEHOVA_URL, "Выставка", EXHIBITION_HASHTAGS, True),
+]
+
+# Разовые дополнительные события, которые нужно всегда публиковать в этом же
+# блоке, даже если они не попадают ни в один из списков выше (например,
+# городской праздник со своей отдельной категорией на сайте). Ссылка
+# запрашивается напрямую как детальная страница, без сканирования списка.
+AFISHAGORODA_EXHIBITIONS_EXTRA_EVENT_URLS = [
+    f"{AFISHAGORODA_BASE}/events/den-goroda-taganrog-2026",
 ]
 
 async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List[Event]:
@@ -1111,6 +1078,72 @@ async def parse_afishagoroda_exhibitions(session: aiohttp.ClientSession) -> List
                         continue
         except Exception as e:
             logger.error(f"Ошибка при парсинге afishagoroda ({event_type_label}): {e}")
+
+    # Разовые дополнительные события (например, "День города") — запрашиваем
+    # напрямую как детальную страницу, без сканирования списка, и добавляем
+    # в тот же блок независимо от того, встретились ли они в источниках выше.
+    for extra_url in AFISHAGORODA_EXHIBITIONS_EXTRA_EVENT_URLS:
+        if extra_url in seen_urls:
+            continue
+        seen_urls.add(extra_url)
+        try:
+            detail_data = await parse_afishagoroda_detail(session, extra_url)
+            title = detail_data.get("title", "")
+            if not title:
+                logger.info(f"Пропуск (разовое событие, не удалось определить название): {extra_url}")
+                continue
+
+            parsed_date = detail_data.get("parsed_date")
+            range_start = detail_data.get("range_start_date")
+            range_end = detail_data.get("range_end_date")
+
+            if parsed_date:
+                if parsed_date < date.today():
+                    logger.info(f"Пропуск (разовое событие, прошедшая дата {parsed_date}): {title}")
+                    continue
+                final_parsed_date = parsed_date
+                final_date_str = detail_data.get("date_str", "")
+            elif range_start and range_end:
+                if range_end < date.today():
+                    logger.info(f"Пропуск (разовое событие, период уже закончился {range_end}): {title}")
+                    continue
+                final_parsed_date = range_start
+                if range_start <= date.today():
+                    final_date_str = f"до {range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
+                elif range_start == range_end:
+                    final_date_str = f"{range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')}"
+                else:
+                    final_date_str = (
+                        f"{range_start.day} {REVERSE_MONTH_MAP.get(range_start.month, '')} – "
+                        f"{range_end.day} {REVERSE_MONTH_MAP.get(range_end.month, '')}"
+                    )
+            else:
+                snippet = detail_data.get("when_raw_snippet", "")
+                logger.info(
+                    f"Пропуск (разовое событие, не удалось определить дату): {title} — {extra_url} "
+                    f"| сырой текст 'Когда:': {snippet!r}"
+                )
+                continue
+
+            event = Event(
+                title=title,
+                url=extra_url,
+                category="exhibitions",
+                event_type="Городской праздник",
+                date_str=final_date_str,
+                parsed_date=final_parsed_date,
+                time_str=detail_data.get("time_str", ""),
+                location=detail_data.get("location", ""),
+                prices=detail_data.get("prices", ""),
+                age_rating=detail_data.get("age_rating", ""),
+                hashtags=["#ДеньГорода", "#Таганрог", "#афиша"],
+                buy_ticket_url=detail_data.get("buy_ticket_url", ""),
+                image_url=detail_data.get("image_url"),
+            )
+            events.append(event)
+            logger.info(f"Разовое событие добавлено к отправке: {title} ({final_parsed_date})")
+        except Exception as extra_err:
+            logger.error(f"Ошибка при обработке разового события {extra_url}: {extra_err}")
 
     return events
 
